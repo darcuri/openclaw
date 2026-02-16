@@ -69,5 +69,6 @@ describe("resolveCronSession", () => {
     expect(result.sessionEntry.modelOverride).toBeUndefined();
     expect(result.sessionEntry.providerOverride).toBeUndefined();
     expect(result.sessionEntry.model).toBeUndefined();
+    expect(result.isNewSession).toBe(true);
   });
 });

@@ -17,6 +17,9 @@ export function resolveCronSession(params: {
   const sessionId = crypto.randomUUID();
   const systemSent = false;
   const sessionEntry: SessionEntry = {
+    // Preserve existing per-session overrides even when rolling to a new sessionId.
+    ...entry,
+    // Always update these core fields
     sessionId,
     updatedAt: params.nowMs,
     systemSent,
