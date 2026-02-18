@@ -212,7 +212,9 @@ describe("dispatchTelegramMessage draft streaming", () => {
 
     expect(editMessageTelegram).toHaveBeenCalledWith(123, 999, "Hello final", expect.any(Object));
     expect(deliverReplies).not.toHaveBeenCalled();
-    expect(draftStream.clear).not.toHaveBeenCalled();
+    // clear() is always called; keepCurrent:true preserves the finalized message while
+    // still allowing cleanup of any orphaned partial messages from prior tool-call turns.
+    expect(draftStream.clear).toHaveBeenCalledWith({ keepCurrent: true });
     expect(draftStream.stop).toHaveBeenCalled();
   });
 
@@ -244,7 +246,9 @@ describe("dispatchTelegramMessage draft streaming", () => {
         replies: [expect.objectContaining({ text: "⚠️ Recovered tool error details" })],
       }),
     );
-    expect(draftStream.clear).not.toHaveBeenCalled();
+    // clear() is always called; keepCurrent:true preserves the finalized message while
+    // still allowing cleanup of any orphaned partial messages from prior tool-call turns.
+    expect(draftStream.clear).toHaveBeenCalledWith({ keepCurrent: true });
     expect(draftStream.stop).toHaveBeenCalled();
   });
 

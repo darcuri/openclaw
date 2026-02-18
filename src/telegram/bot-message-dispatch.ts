@@ -422,9 +422,11 @@ export const dispatchTelegramMessage = async ({
       },
     }));
   } finally {
-    if (!finalizedViaPreviewMessage) {
-      await draftStream?.clear();
-    }
+    // Always call clear() — even when finalized via in-place edit — so that any orphaned
+    // partial-text messages from previous assistant turns (created before tool calls and
+    // abandoned via forceNewMessage) get deleted. keepCurrent=true preserves the final
+    // edited message while still cleaning up orphans.
+    await draftStream?.clear({ keepCurrent: finalizedViaPreviewMessage });
     draftStream?.stop();
   }
   let sentFallback = false;

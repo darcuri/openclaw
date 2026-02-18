@@ -8,7 +8,12 @@ export type TelegramDraftStream = {
   update: (text: string) => void;
   flush: () => Promise<void>;
   messageId: () => number | undefined;
-  clear: () => Promise<void>;
+  /**
+   * Delete the stream preview message(s) and clean up state.
+   * @param opts.keepCurrent - When true, preserve the current streamMessageId (e.g. it was
+   *   finalized via in-place edit) but still delete any orphaned messages from prior turns.
+   */
+  clear: (opts?: { keepCurrent?: boolean }) => Promise<void>;
   stop: () => void;
   /** Reset internal state so the next update creates a new message instead of editing. */
   forceNewMessage: () => void;
@@ -43,6 +48,9 @@ export function createTelegramDraftStream(params: {
   let inFlightPromise: Promise<void> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+  // Tracks message IDs from previous assistant turns that were abandoned via forceNewMessage.
+  // These must be deleted during clear() to avoid leaving orphaned partial messages in chat.
+  const orphanedMessageIds: number[] = [];
 
   const sendOrEditStreamMessage = async (text: string) => {
     if (stopped) {
@@ -92,7 +100,10 @@ export function createTelegramDraftStream(params: {
       clearTimeout(timer);
       timer = undefined;
     }
-    while (!stopped) {
+    for (;;) {
+      if (stopped) {
+        return;
+      }
       if (inFlightPromise) {
         await inFlightPromise;
         continue;
@@ -117,7 +128,7 @@ export function createTelegramDraftStream(params: {
     }
   };
 
-  const clear = async () => {
+  const clear = async (opts?: { keepCurrent?: boolean }) => {
     if (timer) {
       clearTimeout(timer);
       timer = undefined;
@@ -127,17 +138,23 @@ export function createTelegramDraftStream(params: {
     if (inFlightPromise) {
       await inFlightPromise;
     }
+    // Collect all IDs to delete: current stream message (unless keepCurrent) + all orphaned IDs
+    // from previous assistant turns that were abandoned via forceNewMessage().
+    const toDelete: number[] = [...orphanedMessageIds];
+    orphanedMessageIds.length = 0;
     const messageId = streamMessageId;
     streamMessageId = undefined;
-    if (typeof messageId !== "number") {
-      return;
+    if (typeof messageId === "number" && !opts?.keepCurrent) {
+      toDelete.push(messageId);
     }
-    try {
-      await params.api.deleteMessage(chatId, messageId);
-    } catch (err) {
-      params.warn?.(
-        `telegram stream preview cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    for (const id of toDelete) {
+      try {
+        await params.api.deleteMessage(chatId, id);
+      } catch (err) {
+        params.warn?.(
+          `telegram stream preview cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   };
 
@@ -177,6 +194,11 @@ export function createTelegramDraftStream(params: {
   };
 
   const forceNewMessage = () => {
+    // Track the current message ID before clearing so clear() can delete it later.
+    // Without this, the previous turn's partial-text message would be orphaned in chat.
+    if (typeof streamMessageId === "number") {
+      orphanedMessageIds.push(streamMessageId);
+    }
     streamMessageId = undefined;
     lastSentText = "";
     pendingText = "";
