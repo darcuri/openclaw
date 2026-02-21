@@ -1,5 +1,6 @@
 import { resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import { DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH } from "../config/agent-limits.js";
 import { loadConfig } from "../config/config.js";
 import {
   loadSessionStore,
@@ -16,6 +17,7 @@ import {
   mergeDeliveryContext,
   normalizeDeliveryContext,
 } from "../utils/delivery-context.js";
+import { isInternalMessageChannel } from "../utils/message-channel.js";
 import {
   buildAnnounceIdFromChildRun,
   buildAnnounceIdempotencyKey,
@@ -106,10 +108,23 @@ function resolveAnnounceOrigin(
   entry?: DeliveryContextSource,
   requesterOrigin?: DeliveryContext,
 ): DeliveryContext | undefined {
-  // requesterOrigin (captured at spawn time) reflects the channel the user is
+  const normalizedRequester = normalizeDeliveryContext(requesterOrigin);
+  const normalizedEntry = deliveryContextFromSession(entry);
+  if (normalizedRequester?.channel && isInternalMessageChannel(normalizedRequester.channel)) {
+    // Ignore internal channel hints, for example webchat,
+    // so a valid persisted route can still be used for outbound delivery.
+    return mergeDeliveryContext(
+      {
+        accountId: normalizedRequester.accountId,
+        threadId: normalizedRequester.threadId,
+      },
+      normalizedEntry,
+    );
+  }
+  // requesterOrigin, captured at spawn time, reflects the channel the user is
   // actually on and must take priority over the session entry, which may carry
   // stale lastChannel / lastTo values from a previous channel interaction.
-  return mergeDeliveryContext(requesterOrigin, deliveryContextFromSession(entry));
+  return mergeDeliveryContext(normalizedRequester, normalizedEntry);
 }
 
 async function sendAnnounce(item: AnnounceQueueItem) {
@@ -260,6 +275,43 @@ async function readLatestAssistantReplyWithRetry(params: {
   return reply;
 }
 
+function isLikelyWaitingForDescendantResult(reply?: string): boolean {
+  const text = reply?.trim();
+  if (!text) {
+    return false;
+  }
+  const normalized = text.toLowerCase();
+  if (!normalized.includes("waiting")) {
+    return false;
+  }
+  return (
+    normalized.includes("subagent") ||
+    normalized.includes("child") ||
+    normalized.includes("auto-announce") ||
+    normalized.includes("auto announced") ||
+    normalized.includes("result")
+  );
+}
+
+async function waitForAssistantReplyChange(params: {
+  sessionKey: string;
+  previousReply?: string;
+  maxWaitMs: number;
+}): Promise<string | undefined> {
+  const RETRY_INTERVAL_MS = 200;
+  const previous = params.previousReply?.trim() ?? "";
+  const deadline = Date.now() + Math.max(0, Math.min(params.maxWaitMs, 30_000));
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, RETRY_INTERVAL_MS));
+    const latest = await readLatestAssistantReply({ sessionKey: params.sessionKey });
+    const normalizedLatest = latest?.trim() ?? "";
+    if (normalizedLatest && normalizedLatest !== previous) {
+      return latest;
+    }
+  }
+  return undefined;
+}
+
 export function buildSubagentSystemPrompt(params: {
   requesterSessionKey?: string;
   requesterOrigin?: DeliveryContext;
@@ -276,7 +328,10 @@ export function buildSubagentSystemPrompt(params: {
       ? params.task.replace(/\s+/g, " ").trim()
       : "{{TASK_DESCRIPTION}}";
   const childDepth = typeof params.childDepth === "number" ? params.childDepth : 1;
-  const maxSpawnDepth = typeof params.maxSpawnDepth === "number" ? params.maxSpawnDepth : 1;
+  const maxSpawnDepth =
+    typeof params.maxSpawnDepth === "number"
+      ? params.maxSpawnDepth
+      : DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH;
   const canSpawn = childDepth < maxSpawnDepth;
   const parentLabel = childDepth >= 2 ? "parent orchestrator" : "main agent";
 
@@ -296,6 +351,7 @@ export function buildSubagentSystemPrompt(params: {
     "3. **Don't initiate** - No heartbeats, no proactive actions, no side quests",
     "4. **Be ephemeral** - You may be terminated after task completion. That's fine.",
     "5. **Trust push-based completion** - Descendant results are auto-announced back to you; do not busy-poll for status.",
+    "6. **Recover from compacted/truncated tool output** - If you see `[compacted: tool output removed to free context]` or `[truncated: output exceeded context limit]`, assume prior output was reduced. Re-read only what you need using smaller chunks (`read` with offset/limit, or targeted `rg`/`head`/`tail`) instead of full-file `cat`.",
     "",
     "## Output Format",
     "When complete, your final response should include:",
@@ -486,6 +542,40 @@ export async function runSubagentAnnounceFlow(params: {
       shouldDeleteChildSession = false;
       return false;
     }
+    // If the subagent reply is still a "waiting for nested result" placeholder,
+    // hold this announce and wait for the follow-up turn that synthesizes child output.
+    let hasAnyChildDescendantRuns = false;
+    try {
+      const { listDescendantRunsForRequester } = await import("./subagent-registry.js");
+      hasAnyChildDescendantRuns = listDescendantRunsForRequester(params.childSessionKey).length > 0;
+    } catch {
+      // Best-effort only; fall back to existing behavior when unavailable.
+    }
+    if (hasAnyChildDescendantRuns && isLikelyWaitingForDescendantResult(reply)) {
+      const followupReply = await waitForAssistantReplyChange({
+        sessionKey: params.childSessionKey,
+        previousReply: reply,
+        maxWaitMs: settleTimeoutMs,
+      });
+      if (!followupReply?.trim()) {
+        shouldDeleteChildSession = false;
+        return false;
+      }
+      reply = followupReply;
+      try {
+        const { countActiveDescendantRuns } = await import("./subagent-registry.js");
+        activeChildDescendantRuns = Math.max(0, countActiveDescendantRuns(params.childSessionKey));
+      } catch {
+        activeChildDescendantRuns = 0;
+      }
+      if (
+        activeChildDescendantRuns > 0 ||
+        (hasAnyChildDescendantRuns && isLikelyWaitingForDescendantResult(reply))
+      ) {
+        shouldDeleteChildSession = false;
+        return false;
+      }
+    }
 
     // Build status label
     const statusLabel =
@@ -508,23 +598,39 @@ export async function runSubagentAnnounceFlow(params: {
     let requesterIsSubagent = requesterDepth >= 1;
     // If the requester subagent has already finished, bubble the announce to its
     // requester (typically main) so descendant completion is not silently lost.
+    // BUT: only fallback if the parent SESSION is deleted, not just if the current
+    // run ended. A parent waiting for child results has no active run but should
+    // still receive the announce — injecting will start a new agent turn.
     if (requesterIsSubagent) {
       const { isSubagentSessionRunActive, resolveRequesterForChildSession } =
         await import("./subagent-registry.js");
       if (!isSubagentSessionRunActive(targetRequesterSessionKey)) {
-        const fallback = resolveRequesterForChildSession(targetRequesterSessionKey);
-        if (!fallback?.requesterSessionKey) {
-          // Without a requester fallback we cannot safely deliver this nested
-          // completion. Keep cleanup retryable so a later registry restore can
-          // recover and re-announce instead of silently dropping the result.
-          shouldDeleteChildSession = false;
-          return false;
+        // Parent run has ended. Check if parent SESSION still exists.
+        // If it does, the parent may be waiting for child results — inject there.
+        const parentSessionEntry = loadSessionEntryByKey(targetRequesterSessionKey);
+        const parentSessionAlive =
+          parentSessionEntry &&
+          typeof parentSessionEntry.sessionId === "string" &&
+          parentSessionEntry.sessionId.trim();
+
+        if (!parentSessionAlive) {
+          // Parent session is truly gone — fallback to grandparent
+          const fallback = resolveRequesterForChildSession(targetRequesterSessionKey);
+          if (!fallback?.requesterSessionKey) {
+            // Without a requester fallback we cannot safely deliver this nested
+            // completion. Keep cleanup retryable so a later registry restore can
+            // recover and re-announce instead of silently dropping the result.
+            shouldDeleteChildSession = false;
+            return false;
+          }
+          targetRequesterSessionKey = fallback.requesterSessionKey;
+          targetRequesterOrigin =
+            normalizeDeliveryContext(fallback.requesterOrigin) ?? targetRequesterOrigin;
+          requesterDepth = getSubagentDepthFromSessionStore(targetRequesterSessionKey);
+          requesterIsSubagent = requesterDepth >= 1;
         }
-        targetRequesterSessionKey = fallback.requesterSessionKey;
-        targetRequesterOrigin =
-          normalizeDeliveryContext(fallback.requesterOrigin) ?? targetRequesterOrigin;
-        requesterDepth = getSubagentDepthFromSessionStore(targetRequesterSessionKey);
-        requesterIsSubagent = requesterDepth >= 1;
+        // If parent session is alive (just has no active run), continue with parent
+        // as target. Injecting the announce will start a new agent turn for processing.
       }
     }
 
@@ -582,9 +688,9 @@ export async function runSubagentAnnounceFlow(params: {
     // Send to the requester session. For nested subagents this is an internal
     // follow-up injection (deliver=false) so the orchestrator receives it.
     let directOrigin = targetRequesterOrigin;
-    if (!requesterIsSubagent && !directOrigin) {
+    if (!requesterIsSubagent) {
       const { entry } = loadRequesterSessionEntry(targetRequesterSessionKey);
-      directOrigin = deliveryContextFromSession(entry);
+      directOrigin = resolveAnnounceOrigin(entry, targetRequesterOrigin);
     }
     // Use a deterministic idempotency key so the gateway dedup cache
     // catches duplicates if this announce is also queued by the gateway-

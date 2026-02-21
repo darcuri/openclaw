@@ -19,8 +19,27 @@ Use `/subagents` to inspect or control sub-agent runs for the **current session*
 - `/subagents log <id|#> [limit] [tools]`
 - `/subagents info <id|#>`
 - `/subagents send <id|#> <message>`
+- `/subagents steer <id|#> <message>`
+- `/subagents spawn <agentId> <task> [--model <model>] [--thinking <level>]`
 
 `/subagents info` shows run metadata (status, timestamps, session id, transcript path, cleanup).
+
+### Spawn behavior
+
+`/subagents spawn` starts a background sub-agent as a user command, not an internal relay, and it sends one final completion update back to the requester chat when the run finishes.
+
+- The spawn command is non-blocking; it returns a run id immediately.
+- On completion, the sub-agent announces a summary/result message back to the requester chat channel.
+- For manual spawns, delivery is resilient:
+  - OpenClaw tries direct `agent` delivery first with a stable idempotency key.
+  - If direct delivery fails, it falls back to queue routing.
+  - If queue routing is still not available, the announce is retried with a short exponential backoff before final give-up.
+- The completion message is a system message and includes:
+  - `Result` (latest assistant reply text from the child session, after a short settle retry)
+  - `Status` (`completed successfully` / `failed` / `timed out`)
+  - compact runtime/token stats
+- `--model` and `--thinking` override defaults for that specific run.
+- Use `info`/`log` to inspect details and output after completion.
 
 Primary goals:
 
@@ -71,7 +90,7 @@ Auto-archive:
 
 ## Nested Sub-Agents
 
-By default, sub-agents cannot spawn their own sub-agents (`maxSpawnDepth: 1`). You can enable one level of nesting by setting `maxSpawnDepth: 2`, which allows the **orchestrator pattern**: main → orchestrator sub-agent → worker sub-sub-agents.
+By default, sub-agents can spawn one additional level (`maxSpawnDepth: 2`), enabling the **orchestrator pattern**: main → orchestrator sub-agent → worker sub-sub-agents. Set `maxSpawnDepth: 1` to disable nested spawning.
 
 ### How to enable
 
@@ -80,7 +99,7 @@ By default, sub-agents cannot spawn their own sub-agents (`maxSpawnDepth: 1`). Y
   agents: {
     defaults: {
       subagents: {
-        maxSpawnDepth: 2, // allow sub-agents to spawn children (default: 1)
+        maxSpawnDepth: 2, // allow sub-agents to spawn children (default: 2)
         maxChildrenPerAgent: 5, // max active children per agent session (default: 5)
         maxConcurrent: 8, // global concurrency lane cap (default: 8)
       },
@@ -91,11 +110,11 @@ By default, sub-agents cannot spawn their own sub-agents (`maxSpawnDepth: 1`). Y
 
 ### Depth levels
 
-| Depth | Session key shape                            | Role                                          | Can spawn?                   |
-| ----- | -------------------------------------------- | --------------------------------------------- | ---------------------------- |
-| 0     | `agent:<id>:main`                            | Main agent                                    | Always                       |
-| 1     | `agent:<id>:subagent:<uuid>`                 | Sub-agent (orchestrator when depth 2 allowed) | Only if `maxSpawnDepth >= 2` |
-| 2     | `agent:<id>:subagent:<uuid>:subagent:<uuid>` | Sub-sub-agent (leaf worker)                   | Never                        |
+| Depth | Session key shape                            | Role                                | Can spawn?                     |
+| ----- | -------------------------------------------- | ----------------------------------- | ------------------------------ |
+| 0     | `agent:<id>:main`                            | Main agent                          | Always                         |
+| 1     | `agent:<id>:subagent:<uuid>`                 | Sub-agent (orchestrator by default) | Yes, when `maxSpawnDepth >= 2` |
+| 2     | `agent:<id>:subagent:<uuid>:subagent:<uuid>` | Sub-sub-agent (leaf worker)         | No, when `maxSpawnDepth = 2`   |
 
 ### Announce chain
 
@@ -109,9 +128,9 @@ Each level only sees announces from its direct children.
 
 ### Tool policy by depth
 
-- **Depth 1 (orchestrator, when `maxSpawnDepth >= 2`)**: Gets `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history` so it can manage its children. Other session/system tools remain denied.
-- **Depth 1 (leaf, when `maxSpawnDepth == 1`)**: No session tools (current default behavior).
-- **Depth 2 (leaf worker)**: No session tools — `sessions_spawn` is always denied at depth 2. Cannot spawn further children.
+- **Depth 1 (orchestrator, default with `maxSpawnDepth = 2`)**: Gets `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history` so it can manage its children. Other session/system tools remain denied.
+- **Depth 1 (leaf, when `maxSpawnDepth = 1`)**: No session tools.
+- **Depth 2 (leaf worker, default `maxSpawnDepth = 2`)**: No session tools, `sessions_spawn` is denied at depth 2, cannot spawn further children.
 
 ### Per-agent spawn limit
 
@@ -137,17 +156,16 @@ Note: the merge is additive, so main profiles are always available as fallbacks.
 
 ## Announce
 
-Sub-agents report back via an announce step:
+Sub-agents report back via an announce injection step:
 
-- The announce step runs inside the sub-agent session (not the requester session).
-- If the sub-agent replies exactly `ANNOUNCE_SKIP`, nothing is posted.
-- Otherwise the announce reply is posted to the requester chat channel via a follow-up `agent` call (`deliver=true`).
-- Announce replies preserve thread/topic routing when available (Slack threads, Telegram topics, Matrix threads).
-- Announce messages are normalized to a stable template:
-  - `Status:` derived from the run outcome (`success`, `error`, `timeout`, or `unknown`).
-  - `Result:` the summary content from the announce step (or `(not available)` if missing).
-  - `Notes:` error details and other useful context.
-- `Status` is not inferred from model output; it comes from runtime outcome signals.
+- OpenClaw reads the child session's latest assistant reply after completion, with a short settle retry.
+- It builds a system message with `Status`, `Result`, compact stats, and reply guidance.
+- The message is injected with a follow-up `agent` call:
+  - `deliver=false` when the requester is another sub-agent, this keeps orchestration internal.
+  - `deliver=true` when the requester is main, this produces the user-facing update.
+- Delivery context prefers captured requester origin, but non-deliverable channels (for example `webchat`) are ignored in favor of persisted deliverable routes.
+- Recipient agents can return the internal silent token to suppress duplicate outward delivery in the same turn.
+- `Status` is derived from runtime outcome signals, not inferred from model output.
 
 Announce payloads include a stats line at the end (even when wrapped):
 
@@ -165,7 +183,7 @@ By default, sub-agents get **all tools except session tools** and system tools:
 - `sessions_send`
 - `sessions_spawn`
 
-When `maxSpawnDepth >= 2`, depth-1 orchestrator sub-agents additionally receive `sessions_spawn`, `subagents`, `sessions_list`, and `sessions_history` so they can manage their children.
+With the default `maxSpawnDepth = 2`, depth-1 orchestrator sub-agents receive `sessions_spawn`, `subagents`, `sessions_list`, and `sessions_history` so they can manage their children. If you set `maxSpawnDepth = 1`, those session tools stay denied.
 
 Override via config:
 

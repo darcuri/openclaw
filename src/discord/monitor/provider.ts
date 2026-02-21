@@ -1,10 +1,13 @@
-import type { GatewayPlugin } from "@buape/carbon/gateway";
 import {
   Client,
   ReadyListener,
+  type BaseCommand,
   type BaseMessageInteractiveComponent,
   type Modal,
+  type Plugin,
 } from "@buape/carbon";
+import { GatewayCloseCodes, type GatewayPlugin } from "@buape/carbon/gateway";
+import { VoicePlugin } from "@buape/carbon/voice";
 import { Routes } from "discord-api-types/v10";
 import { inspect } from "node:util";
 import type { HistoryEntry } from "../../auto-reply/reply/history.js";
@@ -38,6 +41,8 @@ import { fetchDiscordApplicationId } from "../probe.js";
 import { resolveDiscordChannelAllowlist } from "../resolve-channels.js";
 import { resolveDiscordUserAllowlist } from "../resolve-users.js";
 import { normalizeDiscordToken } from "../token.js";
+import { createDiscordVoiceCommand } from "../voice/command.js";
+import { DiscordVoiceManager, DiscordVoiceReadyListener } from "../voice/manager.js";
 import {
   createAgentComponentButton,
   createAgentSelectMenu,
@@ -65,6 +70,7 @@ import {
   createDiscordNativeCommand,
 } from "./native-command.js";
 import { resolveDiscordPresenceUpdate } from "./presence.js";
+import { resolveDiscordRestFetch } from "./rest-fetch.js";
 
 export type MonitorDiscordOpts = {
   token?: string;
@@ -77,7 +83,7 @@ export type MonitorDiscordOpts = {
   replyToMode?: ReplyToMode;
 };
 
-function summarizeAllowList(list?: Array<string | number>) {
+function summarizeAllowList(list?: string[]) {
   if (!list || list.length === 0) {
     return "any";
   }
@@ -166,6 +172,16 @@ function formatDiscordDeployErrorDetails(err: unknown): string {
   return details.length > 0 ? ` (${details.join(", ")})` : "";
 }
 
+const DISCORD_DISALLOWED_INTENTS_CODE = GatewayCloseCodes.DisallowedIntents;
+
+function isDiscordDisallowedIntentsError(err: unknown): boolean {
+  if (!err) {
+    return false;
+  }
+  const message = formatErrorMessage(err);
+  return message.includes(String(DISCORD_DISALLOWED_INTENTS_CODE));
+}
+
 export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const cfg = opts.config ?? loadConfig();
   const account = resolveDiscordAccount({
@@ -182,6 +198,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const runtime: RuntimeEnv = opts.runtime ?? createNonExitingRuntime();
 
   const discordCfg = account.config;
+  const discordRestFetch = resolveDiscordRestFetch(discordCfg.proxy, runtime);
   const dmConfig = discordCfg.dm;
   let guildEntries = discordCfg.guilds;
   const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
@@ -229,6 +246,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const useAccessGroups = cfg.commands?.useAccessGroups !== false;
   const sessionPrefix = "discord:slash";
   const ephemeralDefault = true;
+  const voiceEnabled = discordCfg.voice?.enabled !== false;
 
   if (token) {
     if (guildEntries && Object.keys(guildEntries).length > 0) {
@@ -257,6 +275,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
           const resolved = await resolveDiscordChannelAllowlist({
             token,
             entries: entries.map((entry) => entry.input),
+            fetcher: discordRestFetch,
           });
           const nextGuilds = { ...guildEntries };
           const mapping: string[] = [];
@@ -313,6 +332,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         const resolvedUsers = await resolveDiscordUserAllowlist({
           token,
           entries: allowEntries.map((entry) => String(entry)),
+          fetcher: discordRestFetch,
         });
         const { mapping, unresolved, additions } = buildAllowlistResolutionSummary(resolvedUsers);
         allowFrom = mergeAllowlist({ existing: allowFrom, additions });
@@ -342,6 +362,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
           const resolvedUsers = await resolveDiscordUserAllowlist({
             token,
             entries: Array.from(userEntries),
+            fetcher: discordRestFetch,
           });
           const { resolvedMap, mapping, unresolved } =
             buildAllowlistResolutionSummary(resolvedUsers);
@@ -352,7 +373,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
               continue;
             }
             const nextGuild = { ...guildConfig } as Record<string, unknown>;
-            const users = (guildConfig as { users?: Array<string | number> }).users;
+            const users = (guildConfig as { users?: string[] }).users;
             if (Array.isArray(users) && users.length > 0) {
               const additions = resolveAllowlistIdAdditions({ existing: users, resolvedMap });
               nextGuild.users = mergeAllowlist({ existing: users, additions });
@@ -383,7 +404,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     );
   }
 
-  const applicationId = await fetchDiscordApplicationId(token, 4000);
+  const applicationId = await fetchDiscordApplicationId(token, 4000, discordRestFetch);
   if (!applicationId) {
     throw new Error("Failed to resolve Discord application id");
   }
@@ -413,7 +434,8 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       ),
     );
   }
-  const commands = commandSpecs.map((spec) =>
+  const voiceManagerRef: { current: DiscordVoiceManager | null } = { current: null };
+  const commands: BaseCommand[] = commandSpecs.map((spec) =>
     createDiscordNativeCommand({
       command: spec,
       cfg,
@@ -423,6 +445,19 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       ephemeralDefault,
     }),
   );
+  if (nativeEnabled && voiceEnabled) {
+    commands.push(
+      createDiscordVoiceCommand({
+        cfg,
+        discordConfig: discordCfg,
+        accountId: account.accountId,
+        groupPolicy,
+        useAccessGroups,
+        getManager: () => voiceManagerRef.current,
+        ephemeralDefault,
+      }),
+    );
+  }
 
   // Initialize exec approvals handler if enabled
   const execApprovalsConfig = discordCfg.execApprovals ?? {};
@@ -491,6 +526,12 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     }
   }
 
+  const clientPlugins: Plugin[] = [
+    createDiscordGatewayPlugin({ discordConfig: discordCfg, runtime }),
+  ];
+  if (voiceEnabled) {
+    clientPlugins.push(new VoicePlugin());
+  }
   const client = new Client(
     {
       baseUrl: "http://localhost",
@@ -506,7 +547,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       components,
       modals,
     },
-    [createDiscordGatewayPlugin({ discordConfig: discordCfg, runtime })],
+    clientPlugins,
   );
 
   await deployDiscordCommands({ client, runtime, enabled: nativeEnabled });
@@ -514,6 +555,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const logger = createSubsystemLogger("discord/monitor");
   const guildHistories = new Map<string, HistoryEntry[]>();
   let botUserId: string | undefined;
+  let voiceManager: DiscordVoiceManager | null = null;
 
   if (nativeDisabledExplicit) {
     await clearDiscordNativeCommands({
@@ -528,6 +570,19 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     botUserId = botUser?.id;
   } catch (err) {
     runtime.error?.(danger(`discord: failed to fetch bot identity: ${String(err)}`));
+  }
+
+  if (voiceEnabled) {
+    voiceManager = new DiscordVoiceManager({
+      client,
+      cfg,
+      discordConfig: discordCfg,
+      accountId: account.accountId,
+      runtime,
+      botUserId,
+    });
+    voiceManagerRef.current = voiceManager;
+    registerDiscordListener(client.listeners, new DiscordVoiceReadyListener(voiceManager));
   }
 
   const messageHandler = createDiscordMessageHandler({
@@ -638,6 +693,8 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     }, HELLO_TIMEOUT_MS);
   };
   gatewayEmitter?.on("debug", onGatewayDebug);
+  // Disallowed intents (4014) should stop the provider without crashing the gateway.
+  let sawDisallowedIntents = false;
   try {
     await waitForDiscordGatewayStop({
       gateway: gateway
@@ -648,15 +705,30 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         : undefined,
       abortSignal,
       onGatewayError: (err) => {
+        if (isDiscordDisallowedIntentsError(err)) {
+          sawDisallowedIntents = true;
+          runtime.error?.(
+            danger(
+              "discord: gateway closed with code 4014 (missing privileged gateway intents). Enable the required intents in the Discord Developer Portal or disable them in config.",
+            ),
+          );
+          return;
+        }
         runtime.error?.(danger(`discord gateway error: ${String(err)}`));
       },
       shouldStopOnError: (err) => {
         const message = String(err);
         return (
-          message.includes("Max reconnect attempts") || message.includes("Fatal Gateway error")
+          message.includes("Max reconnect attempts") ||
+          message.includes("Fatal Gateway error") ||
+          isDiscordDisallowedIntentsError(err)
         );
       },
     });
+  } catch (err) {
+    if (!sawDisallowedIntents && !isDiscordDisallowedIntentsError(err)) {
+      throw err;
+    }
   } finally {
     unregisterGateway(account.accountId);
     stopGatewayLogging();
@@ -665,6 +737,10 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     }
     gatewayEmitter?.removeListener("debug", onGatewayDebug);
     abortSignal?.removeEventListener("abort", onAbort);
+    if (voiceManager) {
+      await voiceManager.destroy();
+      voiceManagerRef.current = null;
+    }
     if (execApprovalsHandler) {
       await execApprovalsHandler.stop();
     }
@@ -689,4 +765,5 @@ async function clearDiscordNativeCommands(params: {
 export const __testing = {
   createDiscordGatewayPlugin,
   dedupeSkillCommandsForDiscord,
+  resolveDiscordRestFetch,
 };

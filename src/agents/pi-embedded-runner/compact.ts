@@ -38,16 +38,16 @@ import {
   validateAnthropicTurns,
   validateGeminiTurns,
 } from "../pi-embedded-helpers.js";
-import {
-  ensurePiCompactionReserveTokens,
-  resolveCompactionReserveTokensFloor,
-} from "../pi-settings.js";
+import { applyPiCompactionSettingsFromConfig } from "../pi-settings.js";
 import { createOpenClawCodingTools } from "../pi-tools.js";
 import { resolveSandboxContext } from "../sandbox.js";
 import { repairSessionFileIfNeeded } from "../session-file-repair.js";
 import { guardSessionManager } from "../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../session-transcript-repair.js";
-import { acquireSessionWriteLock } from "../session-write-lock.js";
+import {
+  acquireSessionWriteLock,
+  resolveSessionLockMaxHoldFromTimeout,
+} from "../session-write-lock.js";
 import { detectRuntimeShell } from "../shell-utils.js";
 import {
   applySkillEnvOverrides,
@@ -57,7 +57,10 @@ import {
   type SkillSnapshot,
 } from "../skills.js";
 import { resolveTranscriptPolicy } from "../transcript-policy.js";
-import { compactWithSafetyTimeout } from "./compaction-safety-timeout.js";
+import {
+  compactWithSafetyTimeout,
+  EMBEDDED_COMPACTION_TIMEOUT_MS,
+} from "./compaction-safety-timeout.js";
 import { buildEmbeddedExtensionPaths } from "./extensions.js";
 import {
   logToolSchemasForGoogle,
@@ -375,6 +378,7 @@ export async function compactEmbeddedPiSessionDirect(
       abortSignal: runAbortController.signal,
       modelProvider: model.provider,
       modelId,
+      modelContextWindowTokens: model.contextWindow,
       modelAuthMode: resolveModelAuthMode(model.provider, params.config),
     });
     const tools = sanitizeToolsForGoogle({ tools: toolsRaw, provider });
@@ -503,6 +507,9 @@ export async function compactEmbeddedPiSessionDirect(
 
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
+      maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
+        timeoutMs: EMBEDDED_COMPACTION_TIMEOUT_MS,
+      }),
     });
     try {
       await repairSessionFileIfNeeded({
@@ -522,9 +529,9 @@ export async function compactEmbeddedPiSessionDirect(
       });
       trackSessionManagerAccess(params.sessionFile);
       const settingsManager = SettingsManager.create(effectiveWorkspace, agentDir);
-      ensurePiCompactionReserveTokens({
+      applyPiCompactionSettingsFromConfig({
         settingsManager,
-        minReserveTokens: resolveCompactionReserveTokensFloor(params.config),
+        cfg: params.config,
       });
       // Call for side effects (sets compaction/pruning runtime state)
       buildEmbeddedExtensionPaths({
@@ -560,6 +567,7 @@ export async function compactEmbeddedPiSessionDirect(
           modelApi: model.api,
           modelId,
           provider,
+          config: params.config,
           sessionManager,
           sessionId: params.sessionId,
           policy: transcriptPolicy,
