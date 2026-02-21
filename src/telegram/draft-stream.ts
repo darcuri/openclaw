@@ -9,7 +9,7 @@ export type TelegramDraftStream = {
   update: (text: string) => void;
   flush: () => Promise<void>;
   messageId: () => number | undefined;
-  clear: () => Promise<void>;
+  clear: (opts?: { keepCurrent?: boolean }) => Promise<void>;
   stop: () => Promise<void>;
   /** Reset internal state so the next update creates a new message instead of editing. */
   forceNewMessage: () => void;
@@ -52,6 +52,10 @@ export function createTelegramDraftStream(params: {
   let lastSentParseMode: "HTML" | undefined;
   let stopped = false;
   let isFinal = false;
+
+  // Tracks message IDs from previous assistant turns that were abandoned via forceNewMessage.
+  // These must be deleted during clear() to avoid leaving orphaned partial messages in chat.
+  const orphanedMessageIds: number[] = [];
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     // Allow final flush even if stopped (e.g., after clear()).
@@ -143,26 +147,35 @@ export function createTelegramDraftStream(params: {
     await loop.flush();
   };
 
-  const clear = async () => {
+  const clear = async (opts?: { keepCurrent?: boolean }) => {
     stopped = true;
     loop.stop();
     await loop.waitForInFlight();
+    const toDelete = [...orphanedMessageIds];
     const messageId = streamMessageId;
     streamMessageId = undefined;
-    if (typeof messageId !== "number") {
+    if (typeof messageId === "number" && !opts?.keepCurrent) {
+      toDelete.push(messageId);
+    }
+    if (toDelete.length === 0) {
       return;
     }
-    try {
-      await params.api.deleteMessage(chatId, messageId);
-      params.log?.(`telegram stream preview deleted (chat=${chatId}, message=${messageId})`);
-    } catch (err) {
-      params.warn?.(
-        `telegram stream preview cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    for (const id of toDelete) {
+      try {
+        await params.api.deleteMessage(chatId, id);
+        params.log?.(`telegram stream preview deleted (chat=${chatId}, message=${id})`);
+      } catch (err) {
+        params.warn?.(
+          `telegram stream preview cleanup failed (id=${id}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   };
 
   const forceNewMessage = () => {
+    if (typeof streamMessageId === "number") {
+      orphanedMessageIds.push(streamMessageId);
+    }
     streamMessageId = undefined;
     lastSentText = "";
     lastSentParseMode = undefined;
