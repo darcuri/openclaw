@@ -2,7 +2,6 @@ import type { OpenClawConfig } from "./types.js";
 import { isPlainObject } from "../utils.js";
 import { parseConfigPath, setConfigValueAtPath, unsetConfigValueAtPath } from "./config-paths.js";
 import { isBlockedObjectKey } from "./prototype-keys.js";
-import type { OpenClawConfig } from "./types.js";
 
 type OverrideTree = Record<string, unknown>;
 

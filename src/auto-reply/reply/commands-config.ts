@@ -20,7 +20,6 @@ import {
 } from "../../config/runtime-overrides.js";
 import { logVerbose } from "../../globals.js";
 import { rejectUnauthorizedCommand, requireCommandFlagEnabled } from "./command-gates.js";
-import type { CommandHandler } from "./commands-types.js";
 import { parseConfigCommand } from "./config-commands.js";
 import { parseDebugCommand } from "./debug-commands.js";
 

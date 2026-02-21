@@ -18,7 +18,6 @@ import {
 } from "../agents/sandbox.js";
 import { SANDBOX_BROWSER_SECURITY_HASH_EPOCH } from "../agents/sandbox/constants.js";
 import { execDockerRaw, type ExecDockerRawResult } from "../agents/sandbox/docker.js";
-import type { SandboxToolPolicy } from "../agents/sandbox/types.js";
 import { loadWorkspaceSkillEntries } from "../agents/skills.js";
 import { resolveToolProfilePolicy } from "../agents/tool-policy.js";
 import { listAgentWorkspaceDirs } from "../agents/workspace-dirs.js";

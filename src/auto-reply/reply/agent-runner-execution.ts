@@ -31,11 +31,7 @@ import {
   resolveMessageChannel,
 } from "../../utils/message-channel.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
-import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
-import type { TemplateContext } from "../templating.js";
-import type { VerboseLevel } from "../thinking.js";
-import { isSilentReplyPrefixText, isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import { SILENT_REPLY_TOKEN, isSilentReplyPrefixText, isSilentReplyText } from "../tokens.js";
 import {
   buildEmbeddedRunBaseParams,
   buildEmbeddedRunContexts,

@@ -32,9 +32,8 @@ import {
   AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET,
   type AuthRateLimiter,
 } from "../../auth-rate-limit.js";
-import { authorizeGatewayConnect, isLocalDirectRequest } from "../../auth.js";
-import type { GatewayAuthResult, ResolvedGatewayAuth } from "../../auth.js";
 import {
+  authorizeGatewayConnect,
   authorizeHttpGatewayConnect,
   authorizeWsControlUiGatewayConnect,
   isLocalDirectRequest,
@@ -45,8 +44,7 @@ import {
   mintCanvasCapabilityToken,
 } from "../../canvas-capability.js";
 import { buildDeviceAuthPayload } from "../../device-auth.js";
-import { isLoopbackAddress, isTrustedProxyAddress, resolveClientIp } from "../../net.js";
-import { resolveHostName } from "../../net.js";
+import { isLoopbackAddress, isTrustedProxyAddress, resolveClientIp, resolveHostName } from "../../net.js";
 import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
 import { checkBrowserOrigin } from "../../origin-check.js";
 import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";

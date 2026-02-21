@@ -5,7 +5,6 @@ import { normalizeOptionalAccountId } from "../../routing/account-id.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
 import { isMessagingToolDuplicate } from "../../agents/pi-embedded-helpers.js";
-import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { extractReplyToTag } from "./reply-tags.js";
 import { createReplyToModeFilterForChannel } from "./reply-threading.js";
 

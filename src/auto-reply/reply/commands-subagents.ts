@@ -1,30 +1,3 @@
-import crypto from "node:crypto";
-import type { SubagentRunRecord } from "../../agents/subagent-registry.js";
-import type { CommandHandler } from "./commands-types.js";
-import { AGENT_LANE_SUBAGENT } from "../../agents/lanes.js";
-import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
-import {
-  clearSubagentRunSteerRestart,
-  listSubagentRunsForRequester,
-  markSubagentRunTerminated,
-  markSubagentRunForSteerRestart,
-  replaceSubagentRunAfterSteer,
-} from "../../agents/subagent-registry.js";
-import { spawnSubagentDirect } from "../../agents/subagent-spawn.js";
-import {
-  extractAssistantText,
-  resolveInternalSessionKey,
-  resolveMainSessionAlias,
-  sanitizeTextContent,
-  stripToolMessages,
-} from "../../agents/tools/sessions-helpers.js";
-import {
-  type SessionEntry,
-  loadSessionStore,
-  resolveStorePath,
-  updateSessionStore,
-} from "../../config/sessions.js";
-import { callGateway } from "../../gateway/call.js";
 import { listSubagentRunsForRequester } from "../../agents/subagent-registry.js";
 import { logVerbose } from "../../globals.js";
 import { handleSubagentsAgentsAction } from "./commands-subagents/action-agents.js";
@@ -38,20 +11,6 @@ import { handleSubagentsSendAction } from "./commands-subagents/action-send.js";
 import { handleSubagentsSpawnAction } from "./commands-subagents/action-spawn.js";
 import { handleSubagentsUnfocusAction } from "./commands-subagents/action-unfocus.js";
 import {
-  formatDurationCompact,
-  formatTokenUsageDisplay,
-  truncateLine,
-} from "../../shared/subagents-format.js";
-import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
-import { stopSubagentsForRequester } from "./abort.js";
-import { clearSessionQueues } from "./queue.js";
-import {
-  formatRunLabel,
-  formatRunStatus,
-  resolveSubagentTargetFromRuns,
-  type SubagentTargetResolution,
-  sortSubagentRuns,
-} from "./subagents-utils.js";
   type SubagentsCommandContext,
   extractMessageText,
   resolveHandledPrefix,

@@ -5,10 +5,7 @@ import type { SessionEntry } from "./types.js";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { resolveDefaultSessionStorePath, resolveSessionFilePath } from "./paths.js";
 import { loadSessionStore, updateSessionStore } from "./store.js";
-import { resolveDefaultSessionStorePath } from "./paths.js";
 import { resolveAndPersistSessionFile } from "./session-file.js";
-import { loadSessionStore } from "./store.js";
-import type { SessionEntry } from "./types.js";
 
 function stripQuery(value: string): string {
   const noHash = value.split("#")[0] ?? value;
