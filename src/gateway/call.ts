@@ -118,7 +118,8 @@ export function buildGatewayConnectionDetails(
   const bindMode = config.gateway?.bind ?? "loopback";
   const scheme = tlsEnabled ? "wss" : "ws";
   // Self-connections should always target loopback; bind mode only controls listener exposure.
-  const localUrl = `${scheme}://127.0.0.1:${localPort}`;
+  const selfConnectHost = config.gateway?.customBindHost?.trim() || "127.0.0.1";
+  const localUrl = `${scheme}://${selfConnectHost}:${localPort}`;
   const urlOverride =
     typeof options.url === "string" && options.url.trim().length > 0
       ? options.url.trim()
