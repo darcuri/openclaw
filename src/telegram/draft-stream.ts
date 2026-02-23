@@ -1,5 +1,5 @@
 import type { Bot } from "grammy";
-import { createDraftStreamLoop } from "../channels/draft-stream-loop.js";
+import { createFinalizableDraftLifecycle } from "../channels/draft-stream-controls.js";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./bot/helpers.js";
 
 const TELEGRAM_STREAM_MAX_CHARS = 4096;
@@ -20,6 +20,12 @@ type TelegramDraftPreview = {
   parseMode?: "HTML";
 };
 
+type SupersededTelegramPreview = {
+  messageId: number;
+  textSnapshot: string;
+  parseMode?: "HTML";
+};
+
 export function createTelegramDraftStream(params: {
   api: Bot["api"];
   chatId: number;
@@ -31,6 +37,8 @@ export function createTelegramDraftStream(params: {
   minInitialChars?: number;
   /** Optional preview renderer (e.g. markdown -> HTML + parse mode). */
   renderText?: (text: string) => TelegramDraftPreview;
+  /** Called when a late send resolves after forceNewMessage() switched generations. */
+  onSupersededPreview?: (preview: SupersededTelegramPreview) => void;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): TelegramDraftStream {
@@ -47,11 +55,11 @@ export function createTelegramDraftStream(params: {
       ? { ...threadParams, reply_to_message_id: params.replyToMessageId }
       : threadParams;
 
+  const streamState = { stopped: false, final: false };
   let streamMessageId: number | undefined;
   let lastSentText = "";
   let lastSentParseMode: "HTML" | undefined;
-  let stopped = false;
-  let isFinal = false;
+  let generation = 0;
 
   // Tracks message IDs from previous assistant turns that were abandoned via forceNewMessage.
   // These must be deleted during clear() to avoid leaving orphaned partial messages in chat.
@@ -59,7 +67,7 @@ export function createTelegramDraftStream(params: {
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     // Allow final flush even if stopped (e.g., after clear()).
-    if (stopped && !isFinal) {
+    if (streamState.stopped && !streamState.final) {
       return false;
     }
     const trimmed = text.trimEnd();
@@ -75,7 +83,7 @@ export function createTelegramDraftStream(params: {
     if (renderedText.length > maxChars) {
       // Telegram text messages/edits cap at 4096 chars.
       // Stop streaming once we exceed the cap to avoid repeated API failures.
-      stopped = true;
+      streamState.stopped = true;
       params.warn?.(
         `telegram stream preview stopped (text length ${renderedText.length} > ${maxChars})`,
       );
@@ -84,9 +92,10 @@ export function createTelegramDraftStream(params: {
     if (renderedText === lastSentText && renderedParseMode === lastSentParseMode) {
       return true;
     }
+    const sendGeneration = generation;
 
     // Debounce first preview send for better push notification quality.
-    if (typeof streamMessageId !== "number" && minInitialChars != null && !isFinal) {
+    if (typeof streamMessageId !== "number" && minInitialChars != null && !streamState.final) {
       if (renderedText.length < minInitialChars) {
         return false;
       }
@@ -114,14 +123,23 @@ export function createTelegramDraftStream(params: {
       const sent = await params.api.sendMessage(chatId, renderedText, sendParams);
       const sentMessageId = sent?.message_id;
       if (typeof sentMessageId !== "number" || !Number.isFinite(sentMessageId)) {
-        stopped = true;
+        streamState.stopped = true;
         params.warn?.("telegram stream preview stopped (missing message id from sendMessage)");
         return false;
       }
-      streamMessageId = Math.trunc(sentMessageId);
+      const normalizedMessageId = Math.trunc(sentMessageId);
+      if (sendGeneration !== generation) {
+        params.onSupersededPreview?.({
+          messageId: normalizedMessageId,
+          textSnapshot: renderedText,
+          parseMode: renderedParseMode,
+        });
+        return true;
+      }
+      streamMessageId = normalizedMessageId;
       return true;
     } catch (err) {
-      stopped = true;
+      streamState.stopped = true;
       params.warn?.(
         `telegram stream preview failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -129,53 +147,55 @@ export function createTelegramDraftStream(params: {
     }
   };
 
-  const loop = createDraftStreamLoop({
+  const { loop, update, stop, clear } = createFinalizableDraftLifecycle({
     throttleMs,
-    isStopped: () => stopped,
+    state: streamState,
     sendOrEditStreamMessage,
+    readMessageId: () => streamMessageId,
+    clearMessageId: () => {
+      streamMessageId = undefined;
+    },
+    isValidMessageId: (value): value is number =>
+      typeof value === "number" && Number.isFinite(value),
+    deleteMessage: async (messageId) => {
+      await params.api.deleteMessage(chatId, messageId);
+    },
+    onDeleteSuccess: (messageId) => {
+      params.log?.(`telegram stream preview deleted (chat=${chatId}, message=${messageId})`);
+    },
+    warn: params.warn,
+    warnPrefix: "telegram stream preview cleanup failed",
   });
 
-  const update = (text: string) => {
-    if (stopped || isFinal) {
-      return;
+  // Wrap the lifecycle's clear to also clean up orphaned messages from forceNewMessage().
+  const clearWithOrphans = async (opts?: { keepCurrent?: boolean }) => {
+    if (!opts?.keepCurrent) {
+      await clear();
+    } else {
+      // keepCurrent: stop the loop but preserve the finalized message.
+      streamState.stopped = true;
+      loop.stop();
+      await loop.waitForInFlight();
     }
-    loop.update(text);
-  };
-
-  const stop = async (): Promise<void> => {
-    isFinal = true;
-    await loop.flush();
-  };
-
-  const clear = async (opts?: { keepCurrent?: boolean }) => {
-    stopped = true;
-    loop.stop();
-    await loop.waitForInFlight();
-    const toDelete = [...orphanedMessageIds];
-    const messageId = streamMessageId;
-    streamMessageId = undefined;
-    if (typeof messageId === "number" && !opts?.keepCurrent) {
-      toDelete.push(messageId);
-    }
-    if (toDelete.length === 0) {
-      return;
-    }
-    for (const id of toDelete) {
+    // Delete any orphaned messages from previous forceNewMessage() calls.
+    for (const id of orphanedMessageIds) {
       try {
         await params.api.deleteMessage(chatId, id);
-        params.log?.(`telegram stream preview deleted (chat=${chatId}, message=${id})`);
+        params.log?.(`telegram stream preview deleted orphan (chat=${chatId}, message=${id})`);
       } catch (err) {
         params.warn?.(
-          `telegram stream preview cleanup failed (id=${id}): ${err instanceof Error ? err.message : String(err)}`,
+          `telegram stream preview orphan cleanup failed (id=${id}): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
+    orphanedMessageIds.length = 0;
   };
 
   const forceNewMessage = () => {
     if (typeof streamMessageId === "number") {
       orphanedMessageIds.push(streamMessageId);
     }
+    generation += 1;
     streamMessageId = undefined;
     lastSentText = "";
     lastSentParseMode = undefined;
@@ -189,7 +209,7 @@ export function createTelegramDraftStream(params: {
     update,
     flush: loop.flush,
     messageId: () => streamMessageId,
-    clear,
+    clear: clearWithOrphans,
     stop,
     forceNewMessage,
   };

@@ -14,6 +14,8 @@ import {
   type StringSelectMenuInteraction,
 } from "@buape/carbon";
 import { ApplicationCommandOptionType, ButtonStyle } from "discord-api-types/v10";
+import { resolveHumanDelayConfig } from "../../agents/identity.js";
+import { resolveChunkMode, resolveTextChunkLimit } from "../../auto-reply/chunk.js";
 import type {
   ChatCommandDefinition,
   CommandArgDefinition,
@@ -21,10 +23,6 @@ import type {
   CommandArgs,
   NativeCommandSpec,
 } from "../../auto-reply/commands-registry.js";
-import type { ReplyPayload } from "../../auto-reply/types.js";
-import type { OpenClawConfig, loadConfig } from "../../config/config.js";
-import { resolveHumanDelayConfig } from "../../agents/identity.js";
-import { resolveChunkMode, resolveTextChunkLimit } from "../../auto-reply/chunk.js";
 import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
@@ -37,10 +35,14 @@ import {
 import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { resolveStoredModelOverride } from "../../auto-reply/reply/model-selection.js";
 import { dispatchReplyWithDispatcher } from "../../auto-reply/reply/provider-dispatcher.js";
+import type { ReplyPayload } from "../../auto-reply/types.js";
 import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
+import type { OpenClawConfig, loadConfig } from "../../config/config.js";
+import { resolveOpenProviderRuntimeGroupPolicy } from "../../config/runtime-group-policy.js";
 import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { buildPairingReply } from "../../pairing/pairing-messages.js";
 import {
@@ -85,6 +87,7 @@ import type { ThreadBindingManager } from "./thread-bindings.js";
 import { resolveDiscordThreadParentInfo } from "./threading.js";
 
 type DiscordConfig = NonNullable<OpenClawConfig["channels"]>["discord"];
+const log = createSubsystemLogger("discord/native-command");
 
 function buildDiscordCommandOptions(params: {
   command: ChatCommandDefinition;
@@ -1327,8 +1330,13 @@ async function dispatchDiscordCommandInteraction(params: {
     const channelAllowlistConfigured =
       Boolean(guildInfo?.channels) && Object.keys(guildInfo?.channels ?? {}).length > 0;
     const channelAllowed = channelConfig?.allowed !== false;
+    const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
+      providerConfigPresent: cfg.channels?.discord !== undefined,
+      groupPolicy: discordConfig?.groupPolicy,
+      defaultGroupPolicy: cfg.channels?.defaults?.groupPolicy,
+    });
     const allowByPolicy = isDiscordGroupAllowedByPolicy({
-      groupPolicy: discordConfig?.groupPolicy ?? "open",
+      groupPolicy,
       guildAllowlisted: Boolean(guildInfo),
       channelAllowlistConfigured,
       channelAllowed,
@@ -1347,7 +1355,8 @@ async function dispatchDiscordCommandInteraction(params: {
       return;
     }
     if (dmPolicy !== "open") {
-      const storeAllowFrom = await readChannelAllowFromStore("discord").catch(() => []);
+      const storeAllowFrom =
+        dmPolicy === "allowlist" ? [] : await readChannelAllowFromStore("discord").catch(() => []);
       const effectiveAllowFrom = [
         ...(discordConfig?.allowFrom ?? discordConfig?.dm?.allowFrom ?? []),
         ...storeAllowFrom,
@@ -1600,7 +1609,8 @@ async function dispatchDiscordCommandInteraction(params: {
         didReply = true;
       },
       onError: (err, info) => {
-        console.error(`discord slash ${info.kind} reply failed`, err);
+        const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        log.error(`discord slash ${info.kind} reply failed: ${message}`);
       },
     },
     replyOptions: {

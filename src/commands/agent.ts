@@ -1,5 +1,3 @@
-import type { AgentCommandOpts } from "./agent/types.js";
-import path from "node:path";
 import {
   listAgentIds,
   resolveAgentDir,
@@ -46,6 +44,7 @@ import {
   resolveAndPersistSessionFile,
   resolveAgentIdFromSessionKey,
   resolveSessionFilePath,
+  resolveSessionFilePathOptions,
   resolveSessionTranscriptPath,
   type SessionEntry,
   updateSessionStore,
@@ -66,6 +65,7 @@ import { deliverAgentCommandResult } from "./agent/delivery.js";
 import { resolveAgentRunContext } from "./agent/run-context.js";
 import { updateSessionStoreAfterAgentRun } from "./agent/session-store.js";
 import { resolveSession } from "./agent/session.js";
+import type { AgentCommandOpts } from "./agent/types.js";
 
 type PersistSessionEntryParams = {
   sessionStore: Record<string, SessionEntry>;
@@ -510,9 +510,11 @@ export async function agentCommand(
         });
       }
     }
-    let sessionFile = resolveSessionFilePath(sessionId, sessionEntry, {
+    const sessionPathOpts = resolveSessionFilePathOptions({
       agentId: sessionAgentId,
+      storePath,
     });
+    let sessionFile = resolveSessionFilePath(sessionId, sessionEntry, sessionPathOpts);
     if (sessionStore && sessionKey) {
       const threadIdFromSessionKey = parseSessionThreadInfo(sessionKey).threadId;
       const fallbackSessionFile = !sessionEntry?.sessionFile
@@ -528,8 +530,8 @@ export async function agentCommand(
         sessionStore,
         storePath,
         sessionEntry,
-        agentId: sessionAgentId,
-        sessionsDir: path.dirname(storePath),
+        agentId: sessionPathOpts?.agentId,
+        sessionsDir: sessionPathOpts?.sessionsDir,
         fallbackSessionFile,
       });
       sessionFile = resolvedSessionFile.sessionFile;
