@@ -1,10 +1,5 @@
 import fs from "node:fs";
-import type { SkillCommandSpec } from "../agents/skills.js";
-import type { OpenClawConfig } from "../config/config.js";
-import type { MediaUnderstandingDecision } from "../media-understanding/types.js";
-import type { CommandCategory } from "./commands-registry.types.js";
-import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "./thinking.js";
-import { lookupContextTokens } from "../agents/context.js";
+import { resolveContextTokensForModel } from "../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { resolveModelAuthMode } from "../agents/model-auth.js";
 import {
@@ -13,9 +8,11 @@ import {
   resolveModelRefFromString,
 } from "../agents/model-selection.js";
 import { resolveSandboxRuntimeStatus } from "../agents/sandbox.js";
+import type { SkillCommandSpec } from "../agents/skills.js";
 import { derivePromptTokens, normalizeUsage, type UsageLike } from "../agents/usage.js";
 import { resolveChannelModelOverride } from "../channels/model-overrides.js";
 import { isCommandFlagEnabled } from "../config/commands.js";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   resolveMainSessionKey,
   resolveSessionFilePath,
@@ -25,6 +22,7 @@ import {
 } from "../config/sessions.js";
 import { formatTimeAgo } from "../infra/format-time/format-relative.ts";
 import { resolveCommitHash } from "../infra/git-commit.js";
+import type { MediaUnderstandingDecision } from "../media-understanding/types.js";
 import { listPluginCommands } from "../plugins/commands.js";
 import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import {
@@ -47,8 +45,10 @@ import {
   listChatCommandsForConfig,
   type ChatCommandDefinition,
 } from "./commands-registry.js";
+import type { CommandCategory } from "./commands-registry.types.js";
 import { resolveActiveFallbackState } from "./fallback-state.js";
 import { formatProviderModelRef, resolveSelectedAndActiveModel } from "./model-runtime.js";
+import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "./thinking.js";
 
 type AgentDefaults = NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>;
 type AgentConfig = Partial<AgentDefaults> & {
@@ -243,7 +243,20 @@ const readUsageFromSessionLog = (
   }
 
   try {
-    const lines = fs.readFileSync(logPath, "utf-8").split(/\n+/);
+    // Read the tail only; we only need the most recent usage entries.
+    const TAIL_BYTES = 8192;
+    const stat = fs.statSync(logPath);
+    const offset = Math.max(0, stat.size - TAIL_BYTES);
+    const buf = Buffer.alloc(Math.min(TAIL_BYTES, stat.size));
+    const fd = fs.openSync(logPath, "r");
+    try {
+      fs.readSync(fd, buf, 0, buf.length, offset);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const tail = buf.toString("utf-8");
+    const lines = (offset > 0 ? tail.slice(tail.indexOf("\n") + 1) : tail).split(/\n+/);
+
     let input = 0;
     let output = 0;
     let promptTokens = 0;
@@ -270,7 +283,7 @@ const readUsageFromSessionLog = (
         }
         model = parsed.message?.model ?? parsed.model ?? model;
       } catch {
-        // ignore bad lines
+        // ignore bad lines (including a truncated first tail line)
       }
     }
 
@@ -398,12 +411,29 @@ const formatVoiceModeLine = (
 export function buildStatusMessage(args: StatusArgs): string {
   const now = args.now ?? Date.now();
   const entry = args.sessionEntry;
+  const selectionConfig = {
+    agents: {
+      defaults: args.agent ?? {},
+    },
+  } as OpenClawConfig;
+  const contextConfig = args.config
+    ? ({
+        ...args.config,
+        agents: {
+          ...args.config.agents,
+          defaults: {
+            ...args.config.agents?.defaults,
+            ...args.agent,
+          },
+        },
+      } as OpenClawConfig)
+    : ({
+        agents: {
+          defaults: args.agent ?? {},
+        },
+      } as OpenClawConfig);
   const resolved = resolveConfiguredModelRef({
-    cfg: {
-      agents: {
-        defaults: args.agent ?? {},
-      },
-    } as OpenClawConfig,
+    cfg: selectionConfig,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -417,10 +447,13 @@ export function buildStatusMessage(args: StatusArgs): string {
   let activeProvider = modelRefs.active.provider;
   let activeModel = modelRefs.active.model;
   let contextTokens =
-    entry?.contextTokens ??
-    args.agent?.contextTokens ??
-    lookupContextTokens(activeModel) ??
-    DEFAULT_CONTEXT_TOKENS;
+    resolveContextTokensForModel({
+      cfg: contextConfig,
+      provider: activeProvider,
+      model: activeModel,
+      contextTokensOverride: entry?.contextTokens ?? args.agent?.contextTokens,
+      fallbackContextTokens: DEFAULT_CONTEXT_TOKENS,
+    }) ?? DEFAULT_CONTEXT_TOKENS;
 
   let inputTokens = entry?.inputTokens;
   let outputTokens = entry?.outputTokens;
@@ -457,7 +490,12 @@ export function buildStatusMessage(args: StatusArgs): string {
         }
       }
       if (!contextTokens && logUsage.model) {
-        contextTokens = lookupContextTokens(logUsage.model) ?? contextTokens;
+        contextTokens =
+          resolveContextTokensForModel({
+            cfg: contextConfig,
+            model: logUsage.model,
+            fallbackContextTokens: contextTokens ?? undefined,
+          }) ?? contextTokens;
       }
       if (!inputTokens || inputTokens === 0) {
         inputTokens = logUsage.input;

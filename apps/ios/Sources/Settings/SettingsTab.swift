@@ -22,7 +22,6 @@ struct SettingsTab: View {
     @AppStorage("talk.enabled") private var talkEnabled: Bool = false
     @AppStorage("talk.button.enabled") private var talkButtonEnabled: Bool = true
     @AppStorage("talk.background.enabled") private var talkBackgroundEnabled: Bool = false
-    @AppStorage("talk.voiceDirectiveHint.enabled") private var talkVoiceDirectiveHintEnabled: Bool = true
     @AppStorage("camera.enabled") private var cameraEnabled: Bool = true
     @AppStorage("location.enabledMode") private var locationEnabledModeRaw: String = OpenClawLocationMode.off.rawValue
     @AppStorage("screen.preventSleep") private var preventSleep: Bool = true
@@ -327,10 +326,6 @@ struct SettingsTab: View {
                                     .foregroundStyle(.secondary)
                             }
                             self.featureToggle(
-                                "Voice Directive Hint",
-                                isOn: self.$talkVoiceDirectiveHintEnabled,
-                                help: "Adds voice-switching instructions to Talk prompts. Disable to reduce prompt size.")
-                            self.featureToggle(
                                 "Show Talk Button",
                                 isOn: self.$talkButtonEnabled,
                                 help: "Shows the floating Talk button in the main interface.")
@@ -374,9 +369,9 @@ struct SettingsTab: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        LabeledContent("Device", value: self.deviceFamily())
-                        LabeledContent("Platform", value: self.platformString())
-                        LabeledContent("OpenClaw", value: self.openClawVersionString())
+                        LabeledContent("Device", value: DeviceInfoHelper.deviceFamily())
+                        LabeledContent("Platform", value: DeviceInfoHelper.platformStringForDisplay())
+                        LabeledContent("OpenClaw", value: DeviceInfoHelper.openClawVersionString())
                     }
                 }
             }
@@ -582,32 +577,6 @@ struct SettingsTab: View {
         }
         let trimmed = self.appModel.gatewayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Not connected" : trimmed
-    }
-
-    private func platformString() -> String {
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "iOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-    }
-
-    private func deviceFamily() -> String {
-        switch UIDevice.current.userInterfaceIdiom {
-        case .pad:
-            "iPad"
-        case .phone:
-            "iPhone"
-        default:
-            "iOS"
-        }
-    }
-
-    private func openClawVersionString() -> String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-        let trimmedBuild = build.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedBuild.isEmpty || trimmedBuild == version {
-            return version
-        }
-        return "\(version) (\(trimmedBuild))"
     }
 
     private func featureToggle(

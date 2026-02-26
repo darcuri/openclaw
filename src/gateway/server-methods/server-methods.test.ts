@@ -248,6 +248,7 @@ describe("exec approval handlers", () => {
   const defaultExecApprovalRequestParams = {
     command: "echo ok",
     cwd: "/tmp",
+    nodeId: "node-1",
     host: "node",
     timeoutMs: 2000,
   } as const;
@@ -323,6 +324,7 @@ describe("exec approval handlers", () => {
       const params = {
         command: "echo hi",
         cwd: "/tmp",
+        nodeId: "node-1",
         host: "node",
       };
       expect(validateExecApprovalRequestParams(params)).toBe(true);
@@ -332,6 +334,7 @@ describe("exec approval handlers", () => {
       const params = {
         command: "echo hi",
         cwd: "/tmp",
+        nodeId: "node-1",
         host: "node",
         resolvedPath: "/usr/bin/echo",
       };
@@ -342,6 +345,7 @@ describe("exec approval handlers", () => {
       const params = {
         command: "echo hi",
         cwd: "/tmp",
+        nodeId: "node-1",
         host: "node",
         resolvedPath: undefined,
       };
@@ -352,11 +356,31 @@ describe("exec approval handlers", () => {
       const params = {
         command: "echo hi",
         cwd: "/tmp",
+        nodeId: "node-1",
         host: "node",
         resolvedPath: null,
       };
       expect(validateExecApprovalRequestParams(params)).toBe(true);
     });
+  });
+
+  it("rejects host=node approval requests without nodeId", async () => {
+    const { handlers, respond, context } = createExecApprovalFixture();
+    await requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        nodeId: undefined,
+      },
+    });
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: "nodeId is required for host=node",
+      }),
+    );
   });
 
   it("broadcasts request + resolve", async () => {
@@ -467,6 +491,56 @@ describe("exec approval handlers", () => {
       undefined,
     );
     expect(resolveRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("forwards turn-source metadata to exec approval forwarding", async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new ExecApprovalManager();
+      const forwarder = {
+        handleRequested: vi.fn(async () => false),
+        handleResolved: vi.fn(async () => {}),
+        stop: vi.fn(),
+      };
+      const handlers = createExecApprovalHandlers(manager, { forwarder });
+      const respond = vi.fn();
+      const context = {
+        broadcast: (_event: string, _payload: unknown) => {},
+        hasExecApprovalClients: () => false,
+      };
+
+      const requestPromise = requestExecApproval({
+        handlers,
+        respond,
+        context,
+        params: {
+          timeoutMs: 60_000,
+          turnSourceChannel: "whatsapp",
+          turnSourceTo: "+15555550123",
+          turnSourceAccountId: "work",
+          turnSourceThreadId: "1739201675.123",
+        },
+      });
+      for (let idx = 0; idx < 20; idx += 1) {
+        await Promise.resolve();
+      }
+      expect(forwarder.handleRequested).toHaveBeenCalledTimes(1);
+      expect(forwarder.handleRequested).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            turnSourceChannel: "whatsapp",
+            turnSourceTo: "+15555550123",
+            turnSourceAccountId: "work",
+            turnSourceThreadId: "1739201675.123",
+          }),
+        }),
+      );
+
+      await vi.runOnlyPendingTimersAsync();
+      await requestPromise;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("expires immediately when no approver clients and no forwarding targets", async () => {

@@ -9,7 +9,7 @@ import { CronService } from "./service.js";
 import { createDeferred, createRunningCronServiceState } from "./service.test-harness.js";
 import { computeJobNextRunAtMs } from "./service/jobs.js";
 import { createCronServiceState, type CronEvent } from "./service/state.js";
-import { executeJobCore, onTimer, runMissedJobs } from "./service/timer.js";
+import { DEFAULT_JOB_TIMEOUT_MS, executeJobCore, onTimer, runMissedJobs } from "./service/timer.js";
 import type { CronJob, CronJobState } from "./types.js";
 
 const noopLogger = {
@@ -561,6 +561,93 @@ describe("Cron issue regressions", () => {
     await runFinished.promise;
     // Barrier for final persistence before cleanup.
     await cron.list({ includeDisabled: true });
+    cron.stop();
+  });
+
+  it("does not advance unrelated due jobs after manual cron.run", async () => {
+    const store = await makeStorePath();
+    const nowMs = Date.now();
+    const dueNextRunAtMs = nowMs - 1_000;
+
+    await writeCronJobs(store.storePath, [
+      createIsolatedRegressionJob({
+        id: "manual-target",
+        name: "manual target",
+        scheduledAt: nowMs,
+        schedule: { kind: "at", at: new Date(nowMs + 3_600_000).toISOString() },
+        payload: { kind: "agentTurn", message: "manual target" },
+        state: { nextRunAtMs: nowMs + 3_600_000 },
+      }),
+      createIsolatedRegressionJob({
+        id: "unrelated-due",
+        name: "unrelated due",
+        scheduledAt: nowMs,
+        schedule: { kind: "cron", expr: "*/5 * * * *", tz: "UTC" },
+        payload: { kind: "agentTurn", message: "unrelated due" },
+        state: { nextRunAtMs: dueNextRunAtMs },
+      }),
+    ]);
+
+    const cron = await startCronForStore({
+      storePath: store.storePath,
+      cronEnabled: false,
+      runIsolatedAgentJob: createDefaultIsolatedRunner(),
+    });
+
+    const runResult = await cron.run("manual-target", "force");
+    expect(runResult).toEqual({ ok: true, ran: true });
+
+    const jobs = await cron.list({ includeDisabled: true });
+    const unrelated = jobs.find((entry) => entry.id === "unrelated-due");
+    expect(unrelated).toBeDefined();
+    expect(unrelated?.state.nextRunAtMs).toBe(dueNextRunAtMs);
+
+    cron.stop();
+  });
+
+  it("keeps telegram delivery target writeback after manual cron.run", async () => {
+    const store = await makeStorePath();
+    const originalTarget = "https://t.me/obviyus";
+    const rewrittenTarget = "-10012345/6789";
+    const runIsolatedAgentJob = vi.fn(async (params: { job: { id: string } }) => {
+      const raw = await fs.readFile(store.storePath, "utf-8");
+      const persisted = JSON.parse(raw) as { version: number; jobs: CronJob[] };
+      const targetJob = persisted.jobs.find((job) => job.id === params.job.id);
+      if (targetJob?.delivery?.channel === "telegram") {
+        targetJob.delivery.to = rewrittenTarget;
+      }
+      await fs.writeFile(store.storePath, JSON.stringify(persisted, null, 2), "utf-8");
+      return { status: "ok" as const, summary: "done", delivered: true };
+    });
+
+    const cron = await startCronForStore({
+      storePath: store.storePath,
+      runIsolatedAgentJob,
+    });
+    const job = await cron.add({
+      name: "manual-writeback",
+      enabled: true,
+      schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
+      sessionTarget: "isolated",
+      wakeMode: "next-heartbeat",
+      payload: { kind: "agentTurn", message: "test" },
+      delivery: {
+        mode: "announce",
+        channel: "telegram",
+        to: originalTarget,
+      },
+    });
+
+    const result = await cron.run(job.id, "force");
+    expect(result).toEqual({ ok: true, ran: true });
+
+    const persisted = JSON.parse(await fs.readFile(store.storePath, "utf8")) as {
+      jobs: CronJob[];
+    };
+    const persistedJob = persisted.jobs.find((entry) => entry.id === job.id);
+    expect(persistedJob?.delivery?.to).toBe(rewrittenTarget);
+    expect(persistedJob?.state.lastStatus).toBe("ok");
+    expect(persistedJob?.state.lastDelivered).toBe(true);
 
     cron.stop();
   });
@@ -749,6 +836,58 @@ describe("Cron issue regressions", () => {
 
     const job = state.store?.jobs.find((j) => j.id === "no-timeout-0");
     expect(job?.state.lastStatus).toBe("ok");
+  });
+
+  it("does not time out agentTurn jobs at the default 10-minute safety window", async () => {
+    const store = await makeStorePath();
+    const scheduledAt = Date.parse("2026-02-15T13:00:00.000Z");
+
+    const cronJob = createIsolatedRegressionJob({
+      id: "agentturn-default-safety-window",
+      name: "agentturn default safety window",
+      scheduledAt,
+      schedule: { kind: "at", at: new Date(scheduledAt).toISOString() },
+      payload: { kind: "agentTurn", message: "work" },
+      state: { nextRunAtMs: scheduledAt },
+    });
+    await writeCronJobs(store.storePath, [cronJob]);
+
+    let now = scheduledAt;
+    const deferredRun = createDeferred<{ status: "ok"; summary: string }>();
+    const runIsolatedAgentJob = vi.fn(async ({ abortSignal }: { abortSignal?: AbortSignal }) => {
+      const result = await deferredRun.promise;
+      if (abortSignal?.aborted) {
+        return { status: "error" as const, error: String(abortSignal.reason) };
+      }
+      now += 5;
+      return result;
+    });
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob,
+    });
+
+    const timerPromise = onTimer(state);
+    let settled = false;
+    void timerPromise.finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_JOB_TIMEOUT_MS + 1_000);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    deferredRun.resolve({ status: "ok", summary: "done" });
+    await timerPromise;
+
+    const job = state.store?.jobs.find((entry) => entry.id === "agentturn-default-safety-window");
+    expect(job?.state.lastStatus).toBe("ok");
+    expect(job?.state.lastError).toBeUndefined();
   });
 
   it("aborts isolated runs when cron timeout fires", async () => {

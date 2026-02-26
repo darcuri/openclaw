@@ -21,6 +21,7 @@ import {
   resolveNativeSkillsEnabled,
 } from "../../config/commands.js";
 import { loadConfig } from "../../config/config.js";
+import { isDangerousNameMatchingEnabled } from "../../config/dangerous-name-matching.js";
 import {
   GROUP_POLICY_BLOCKED_LABEL,
   resolveOpenProviderRuntimeGroupPolicy,
@@ -50,6 +51,7 @@ import {
 } from "./agent-components.js";
 import { resolveDiscordSlashCommandConfig } from "./commands.js";
 import { createExecApprovalButton, DiscordExecApprovalHandler } from "./exec-approvals.js";
+import { attachEarlyGatewayErrorGuard } from "./gateway-error-guard.js";
 import { createDiscordGatewayPlugin } from "./gateway-plugin.js";
 import {
   DiscordMessageListener,
@@ -69,7 +71,13 @@ import { resolveDiscordPresenceUpdate } from "./presence.js";
 import { resolveDiscordAllowlistConfig } from "./provider.allowlist.js";
 import { runDiscordGatewayLifecycle } from "./provider.lifecycle.js";
 import { resolveDiscordRestFetch } from "./rest-fetch.js";
-import { createNoopThreadBindingManager, createThreadBindingManager } from "./thread-bindings.js";
+import {
+  createNoopThreadBindingManager,
+  createThreadBindingManager,
+  resolveThreadBindingSessionTtlMs,
+  resolveThreadBindingsEnabled,
+  reconcileAcpThreadBindingsOnStartup,
+} from "./thread-bindings.js";
 import { formatThreadBindingTtlLabel } from "./thread-bindings.messages.js";
 
 export type MonitorDiscordOpts = {
@@ -100,47 +108,6 @@ function summarizeGuilds(entries?: Record<string, unknown>) {
   const sample = keys.slice(0, 4);
   const suffix = keys.length > sample.length ? ` (+${keys.length - sample.length})` : "";
   return `${sample.join(", ")}${suffix}`;
-}
-
-const DEFAULT_THREAD_BINDING_TTL_HOURS = 24;
-
-function normalizeThreadBindingTtlHours(raw: unknown): number | undefined {
-  if (typeof raw !== "number" || !Number.isFinite(raw)) {
-    return undefined;
-  }
-  if (raw < 0) {
-    return undefined;
-  }
-  return raw;
-}
-
-function resolveThreadBindingSessionTtlMs(params: {
-  channelTtlHoursRaw: unknown;
-  sessionTtlHoursRaw: unknown;
-}): number {
-  const ttlHours =
-    normalizeThreadBindingTtlHours(params.channelTtlHoursRaw) ??
-    normalizeThreadBindingTtlHours(params.sessionTtlHoursRaw) ??
-    DEFAULT_THREAD_BINDING_TTL_HOURS;
-  return Math.floor(ttlHours * 60 * 60 * 1000);
-}
-
-function normalizeThreadBindingsEnabled(raw: unknown): boolean | undefined {
-  if (typeof raw !== "boolean") {
-    return undefined;
-  }
-  return raw;
-}
-
-function resolveThreadBindingsEnabled(params: {
-  channelEnabledRaw: unknown;
-  sessionEnabledRaw: unknown;
-}): boolean {
-  return (
-    normalizeThreadBindingsEnabled(params.channelEnabledRaw) ??
-    normalizeThreadBindingsEnabled(params.sessionEnabledRaw) ??
-    true
-  );
 }
 
 function formatThreadBindingSessionTtlLabel(ttlMs: number): string {
@@ -363,7 +330,20 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         sessionTtlMs: threadBindingSessionTtlMs,
       })
     : createNoopThreadBindingManager(account.accountId);
+  if (threadBindingsEnabled) {
+    const reconciliation = reconcileAcpThreadBindingsOnStartup({
+      cfg,
+      accountId: account.accountId,
+      sendFarewell: false,
+    });
+    if (reconciliation.removed > 0) {
+      logVerbose(
+        `discord: removed ${reconciliation.removed}/${reconciliation.checked} stale ACP thread bindings on startup for account ${account.accountId}`,
+      );
+    }
+  }
   let lifecycleStarted = false;
+  let releaseEarlyGatewayErrorGuard = () => {};
   try {
     const commands: BaseCommand[] = commandSpecs.map((spec) =>
       createDiscordNativeCommand({
@@ -495,6 +475,8 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       },
       clientPlugins,
     );
+    const earlyGatewayErrorGuard = attachEarlyGatewayErrorGuard(client);
+    releaseEarlyGatewayErrorGuard = earlyGatewayErrorGuard.release;
 
     await deployDiscordCommands({ client, runtime, enabled: nativeEnabled });
 
@@ -549,6 +531,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       allowFrom,
       guildEntries,
       threadBindings,
+      discordRestFetch,
     });
 
     registerDiscordListener(client.listeners, new DiscordMessageListener(messageHandler, logger));
@@ -559,6 +542,13 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         accountId: account.accountId,
         runtime,
         botUserId,
+        dmEnabled,
+        groupDmEnabled,
+        groupDmChannels: groupDmChannels ?? [],
+        dmPolicy,
+        allowFrom: allowFrom ?? [],
+        groupPolicy,
+        allowNameMatching: isDangerousNameMatchingEnabled(discordCfg),
         guildEntries,
         logger,
       }),
@@ -570,6 +560,13 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         accountId: account.accountId,
         runtime,
         botUserId,
+        dmEnabled,
+        groupDmEnabled,
+        groupDmChannels: groupDmChannels ?? [],
+        dmPolicy,
+        allowFrom: allowFrom ?? [],
+        groupPolicy,
+        allowNameMatching: isDangerousNameMatchingEnabled(discordCfg),
         guildEntries,
         logger,
       }),
@@ -596,8 +593,11 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       voiceManagerRef,
       execApprovalsHandler,
       threadBindings,
+      pendingGatewayErrors: earlyGatewayErrorGuard.pendingErrors,
+      releaseEarlyGatewayErrorGuard,
     });
   } finally {
+    releaseEarlyGatewayErrorGuard();
     if (!lifecycleStarted) {
       threadBindings.stop();
     }

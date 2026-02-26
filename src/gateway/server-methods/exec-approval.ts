@@ -43,13 +43,19 @@ export function createExecApprovalHandlers(
       const p = params as {
         id?: string;
         command: string;
+        commandArgv?: string[];
         cwd?: string;
+        nodeId?: string;
         host?: string;
         security?: string;
         ask?: string;
         agentId?: string;
         resolvedPath?: string;
         sessionKey?: string;
+        turnSourceChannel?: string;
+        turnSourceTo?: string;
+        turnSourceAccountId?: string;
+        turnSourceThreadId?: string | number;
         timeoutMs?: number;
         twoPhase?: boolean;
       };
@@ -57,6 +63,19 @@ export function createExecApprovalHandlers(
       const timeoutMs =
         typeof p.timeoutMs === "number" ? p.timeoutMs : DEFAULT_EXEC_APPROVAL_TIMEOUT_MS;
       const explicitId = typeof p.id === "string" && p.id.trim().length > 0 ? p.id.trim() : null;
+      const host = typeof p.host === "string" ? p.host.trim() : "";
+      const nodeId = typeof p.nodeId === "string" ? p.nodeId.trim() : "";
+      const commandArgv = Array.isArray(p.commandArgv)
+        ? p.commandArgv.map((entry) => String(entry))
+        : undefined;
+      if (host === "node" && !nodeId) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "nodeId is required for host=node"),
+        );
+        return;
+      }
       if (explicitId && manager.getSnapshot(explicitId)) {
         respond(
           false,
@@ -67,13 +86,21 @@ export function createExecApprovalHandlers(
       }
       const request = {
         command: p.command,
+        commandArgv,
         cwd: p.cwd ?? null,
-        host: p.host ?? null,
+        nodeId: host === "node" ? nodeId : null,
+        host: host || null,
         security: p.security ?? null,
         ask: p.ask ?? null,
         agentId: p.agentId ?? null,
         resolvedPath: p.resolvedPath ?? null,
         sessionKey: p.sessionKey ?? null,
+        turnSourceChannel:
+          typeof p.turnSourceChannel === "string" ? p.turnSourceChannel.trim() || null : null,
+        turnSourceTo: typeof p.turnSourceTo === "string" ? p.turnSourceTo.trim() || null : null,
+        turnSourceAccountId:
+          typeof p.turnSourceAccountId === "string" ? p.turnSourceAccountId.trim() || null : null,
+        turnSourceThreadId: p.turnSourceThreadId ?? null,
       };
       const record = manager.create(request, timeoutMs, explicitId);
       record.requestedByConnId = client?.connId ?? null;
