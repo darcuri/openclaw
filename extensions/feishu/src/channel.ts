@@ -7,7 +7,6 @@ import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
 } from "openclaw/plugin-sdk";
-import type { ResolvedFeishuAccount, FeishuConfig } from "./types.js";
 import {
   resolveFeishuAccount,
   resolveFeishuCredentials,
@@ -26,6 +25,7 @@ import { resolveFeishuGroupToolPolicy } from "./policy.js";
 import { probeFeishu } from "./probe.js";
 import { sendMessageFeishu } from "./send.js";
 import { normalizeFeishuTarget, looksLikeFeishuId, formatFeishuTarget } from "./targets.js";
+import type { ResolvedFeishuAccount, FeishuConfig } from "./types.js";
 
 const meta: ChannelMeta = {
   id: "feishu",
@@ -37,6 +37,22 @@ const meta: ChannelMeta = {
   aliases: ["lark"],
   order: 70,
 };
+
+const secretInputJsonSchema = {
+  oneOf: [
+    { type: "string" },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["source", "provider", "id"],
+      properties: {
+        source: { type: "string", enum: ["env", "file", "exec"] },
+        provider: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1 },
+      },
+    },
+  ],
+} as const;
 
 export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
   id: "feishu",
@@ -79,10 +95,11 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        defaultAccount: { type: "string" },
         appId: { type: "string" },
-        appSecret: { type: "string" },
+        appSecret: secretInputJsonSchema,
         encryptKey: { type: "string" },
-        verificationToken: { type: "string" },
+        verificationToken: secretInputJsonSchema,
         domain: {
           oneOf: [
             { type: "string", enum: ["feishu", "lark"] },
@@ -121,9 +138,9 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
               enabled: { type: "boolean" },
               name: { type: "string" },
               appId: { type: "string" },
-              appSecret: { type: "string" },
+              appSecret: secretInputJsonSchema,
               encryptKey: { type: "string" },
-              verificationToken: { type: "string" },
+              verificationToken: secretInputJsonSchema,
               domain: { type: "string", enum: ["feishu", "lark"] },
               connectionMode: { type: "string", enum: ["websocket", "webhook"] },
               webhookHost: { type: "string" },

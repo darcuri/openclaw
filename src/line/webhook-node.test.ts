@@ -1,5 +1,5 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
 import crypto from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createLineNodeWebhookHandler } from "./webhook-node.js";
 
@@ -124,6 +124,31 @@ describe("createLineNodeWebhookHandler", () => {
     expect(res.statusCode).toBe(400);
     expect(readBody).toHaveBeenCalledTimes(1);
     expect(bot.handleWebhook).not.toHaveBeenCalled();
+  });
+
+  it("uses strict pre-auth limits for signed POST requests", async () => {
+    const rawBody = JSON.stringify({ events: [{ type: "message" }] });
+    const bot = { handleWebhook: vi.fn(async () => {}) };
+    const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+    const readBody = vi.fn(async (_req: IncomingMessage, maxBytes: number, timeoutMs?: number) => {
+      expect(maxBytes).toBe(64 * 1024);
+      expect(timeoutMs).toBe(5_000);
+      return rawBody;
+    });
+    const handler = createLineNodeWebhookHandler({
+      channelSecret: "secret",
+      bot,
+      runtime,
+      readBody,
+      maxBodyBytes: 1024 * 1024,
+    });
+
+    const { res } = createRes();
+    await runSignedPost({ handler, rawBody, secret: "secret", res });
+
+    expect(res.statusCode).toBe(200);
+    expect(readBody).toHaveBeenCalledTimes(1);
+    expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
   });
 
   it("rejects invalid signature", async () => {

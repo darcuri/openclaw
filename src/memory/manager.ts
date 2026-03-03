@@ -1,19 +1,11 @@
-import type { DatabaseSync } from "node:sqlite";
-import { type FSWatcher } from "chokidar";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ResolvedMemorySearchConfig } from "../agents/memory-search.js";
-import type { OpenClawConfig } from "../config/config.js";
-import type {
-  MemoryEmbeddingProbeResult,
-  MemoryProviderStatus,
-  MemorySearchManager,
-  MemorySearchResult,
-  MemorySource,
-  MemorySyncProgressUpdate,
-} from "./types.js";
+import type { DatabaseSync } from "node:sqlite";
+import { type FSWatcher } from "chokidar";
 import { resolveAgentDir, resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
+import type { ResolvedMemorySearchConfig } from "../agents/memory-search.js";
 import { resolveMemorySearchConfig } from "../agents/memory-search.js";
+import type { OpenClawConfig } from "../config/config.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   createEmbeddingProvider,
@@ -21,6 +13,7 @@ import {
   type EmbeddingProviderResult,
   type GeminiEmbeddingClient,
   type MistralEmbeddingClient,
+  type OllamaEmbeddingClient,
   type OpenAiEmbeddingClient,
   type VoyageEmbeddingClient,
 } from "./embeddings.js";
@@ -30,6 +23,14 @@ import { isMemoryPath, normalizeExtraMemoryPaths } from "./internal.js";
 import { MemoryManagerEmbeddingOps } from "./manager-embedding-ops.js";
 import { searchKeyword, searchVector } from "./manager-search.js";
 import { extractKeywords } from "./query-expansion.js";
+import type {
+  MemoryEmbeddingProbeResult,
+  MemoryProviderStatus,
+  MemorySearchManager,
+  MemorySearchResult,
+  MemorySource,
+  MemorySyncProgressUpdate,
+} from "./types.js";
 const SNIPPET_MAX_CHARS = 700;
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
@@ -48,14 +49,22 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   protected readonly workspaceDir: string;
   protected readonly settings: ResolvedMemorySearchConfig;
   protected provider: EmbeddingProvider | null;
-  private readonly requestedProvider: "openai" | "local" | "gemini" | "voyage" | "mistral" | "auto";
-  protected fallbackFrom?: "openai" | "local" | "gemini" | "voyage" | "mistral";
+  private readonly requestedProvider:
+    | "openai"
+    | "local"
+    | "gemini"
+    | "voyage"
+    | "mistral"
+    | "ollama"
+    | "auto";
+  protected fallbackFrom?: "openai" | "local" | "gemini" | "voyage" | "mistral" | "ollama";
   protected fallbackReason?: string;
   private readonly providerUnavailableReason?: string;
   protected openAi?: OpenAiEmbeddingClient;
   protected gemini?: GeminiEmbeddingClient;
   protected voyage?: VoyageEmbeddingClient;
   protected mistral?: MistralEmbeddingClient;
+  protected ollama?: OllamaEmbeddingClient;
   protected batch: {
     enabled: boolean;
     wait: boolean;
@@ -185,6 +194,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     this.gemini = params.providerResult.gemini;
     this.voyage = params.providerResult.voyage;
     this.mistral = params.providerResult.mistral;
+    this.ollama = params.providerResult.ollama;
     this.sources = new Set(params.settings.sources);
     this.db = this.openDatabase();
     this.providerKey = this.computeProviderKey();
@@ -289,9 +299,11 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       return merged;
     }
 
-    const keywordResults = hybrid.enabled
-      ? await this.searchKeyword(cleaned, candidates).catch(() => [])
-      : [];
+    // If FTS isn't available, hybrid mode cannot use keyword search; degrade to vector-only.
+    const keywordResults =
+      hybrid.enabled && this.fts.enabled && this.fts.available
+        ? await this.searchKeyword(cleaned, candidates).catch(() => [])
+        : [];
 
     const queryVec = await this.embedQueryWithTimeout(cleaned);
     const hasVector = queryVec.some((v) => v !== 0);
@@ -299,7 +311,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       ? await this.searchVector(queryVec, candidates).catch(() => [])
       : [];
 
-    if (!hybrid.enabled) {
+    if (!hybrid.enabled || !this.fts.enabled || !this.fts.available) {
       return vectorResults.filter((entry) => entry.score >= minScore).slice(0, maxResults);
     }
 
@@ -311,8 +323,28 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       mmr: hybrid.mmr,
       temporalDecay: hybrid.temporalDecay,
     });
+    const strict = merged.filter((entry) => entry.score >= minScore);
+    if (strict.length > 0 || keywordResults.length === 0) {
+      return strict.slice(0, maxResults);
+    }
 
-    return merged.filter((entry) => entry.score >= minScore).slice(0, maxResults);
+    // Hybrid defaults can produce keyword-only matches with max score equal to
+    // textWeight (for example 0.3). If minScore is higher (for example 0.35),
+    // these exact lexical hits get filtered out even when they are the only
+    // relevant results.
+    const relaxedMinScore = Math.min(minScore, hybrid.textWeight);
+    const keywordKeys = new Set(
+      keywordResults.map(
+        (entry) => `${entry.source}:${entry.path}:${entry.startLine}:${entry.endLine}`,
+      ),
+    );
+    return merged
+      .filter(
+        (entry) =>
+          keywordKeys.has(`${entry.source}:${entry.path}:${entry.startLine}:${entry.endLine}`) &&
+          entry.score >= relaxedMinScore,
+      )
+      .slice(0, maxResults);
   }
 
   private async searchVector(

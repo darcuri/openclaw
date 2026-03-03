@@ -1,16 +1,15 @@
-import type { ApplyAuthChoiceParams, ApplyAuthChoiceResult } from "./auth-choice.apply.js";
 import { ensureAuthProfileStore, resolveAuthProfileOrder } from "../agents/auth-profiles.js";
 import type { SecretInput } from "../config/types.secrets.js";
 import { normalizeApiKeyInput, validateApiKeyInput } from "./auth-choice.api-key.js";
 import {
   normalizeSecretInputModeInput,
   createAuthChoiceAgentModelNoter,
-  createAuthChoiceDefaultModelApplier,
-  createAuthChoiceModelStateBridge,
+  createAuthChoiceDefaultModelApplierForMutableState,
   ensureApiKeyFromOptionEnvOrPrompt,
   normalizeTokenProviderInput,
 } from "./auth-choice.apply-helpers.js";
 import { applyAuthChoiceHuggingface } from "./auth-choice.apply.huggingface.js";
+import type { ApplyAuthChoiceParams, ApplyAuthChoiceResult } from "./auth-choice.apply.js";
 import { applyAuthChoiceOpenRouter } from "./auth-choice.apply.openrouter.js";
 import {
   applyGoogleGeminiModelDefault,
@@ -317,14 +316,12 @@ export async function applyAuthChoiceApiProviders(
   let nextConfig = params.config;
   let agentModelOverride: string | undefined;
   const noteAgentModel = createAuthChoiceAgentModelNoter(params);
-  const applyProviderDefaultModel = createAuthChoiceDefaultModelApplier(
+  const applyProviderDefaultModel = createAuthChoiceDefaultModelApplierForMutableState(
     params,
-    createAuthChoiceModelStateBridge({
-      getConfig: () => nextConfig,
-      setConfig: (config) => (nextConfig = config),
-      getAgentModelOverride: () => agentModelOverride,
-      setAgentModelOverride: (model) => (agentModelOverride = model),
-    }),
+    () => nextConfig,
+    (config) => (nextConfig = config),
+    () => agentModelOverride,
+    (model) => (agentModelOverride = model),
   );
 
   let authChoice = params.authChoice;
