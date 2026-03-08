@@ -722,11 +722,9 @@ export const dispatchTelegramMessage = async ({
     }
     for (const [stream, cleanupState] of streamCleanupStates) {
       await stream.stop();
-      // Always call clear() — even when finalized via in-place edit — so that any orphaned
-      // partial-text messages from previous assistant turns (created before tool calls and
-      // abandoned via forceNewMessage) get deleted. keepCurrent=true preserves the final
-      // edited message while still cleaning up orphans.
-      await stream.clear({ keepCurrent: !cleanupState.shouldClear });
+      if (cleanupState.shouldClear) {
+        await stream.clear();
+      }
     }
     for (const archivedPreview of archivedAnswerPreviews) {
       if (archivedPreview.deleteIfUnused === false) {
