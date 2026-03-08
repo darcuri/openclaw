@@ -22,17 +22,45 @@ enum HostEnvSecurityPolicy {
         "PS4",
         "GCONV_PATH",
         "IFS",
-        "SSLKEYLOGFILE"
+        "SSLKEYLOGFILE",
     ]
 
     static let blockedOverrideKeys: Set<String> = [
         "HOME",
-        "ZDOTDIR"
+        "ZDOTDIR",
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_PROXY_COMMAND",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "LESSOPEN",
+        "LESSCLOSE",
+        "PAGER",
+        "MANPAGER",
+        "GIT_PAGER",
+        "EDITOR",
+        "VISUAL",
+        "FCEDIT",
+        "SUDO_EDITOR",
+        "PROMPT_COMMAND",
+        "HISTFILE",
+        "PERL5DB",
+        "PERL5DBCMD",
+        "OPENSSL_CONF",
+        "OPENSSL_ENGINES",
+        "PYTHONSTARTUP",
+        "WGETRC",
+        "CURL_HOME",
+    ]
+
+    static let blockedOverridePrefixes: [String] = [
+        "GIT_CONFIG_",
+        "NPM_CONFIG_",
     ]
 
     static let blockedPrefixes: [String] = [
         "DYLD_",
         "LD_",
-        "BASH_FUNC_"
+        "BASH_FUNC_",
     ]
 }

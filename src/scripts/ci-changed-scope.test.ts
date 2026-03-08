@@ -1,13 +1,30 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
-const { detectChangedScope } = (await import("../../scripts/ci-changed-scope.mjs")) as unknown as {
-  detectChangedScope: (paths: string[]) => {
-    runNode: boolean;
-    runMacos: boolean;
-    runAndroid: boolean;
-    runWindows: boolean;
+const { detectChangedScope, listChangedPaths } =
+  (await import("../../scripts/ci-changed-scope.mjs")) as unknown as {
+    detectChangedScope: (paths: string[]) => {
+      runNode: boolean;
+      runMacos: boolean;
+      runAndroid: boolean;
+      runWindows: boolean;
+      runSkillsPython: boolean;
+    };
+    listChangedPaths: (base: string, head?: string) => string[];
   };
-};
+
+const markerPaths: string[] = [];
+
+afterEach(() => {
+  for (const markerPath of markerPaths) {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {}
+  }
+  markerPaths.length = 0;
+});
 
 describe("detectChangedScope", () => {
   it("fails safe when no paths are provided", () => {
@@ -16,6 +33,7 @@ describe("detectChangedScope", () => {
       runMacos: true,
       runAndroid: true,
       runWindows: true,
+      runSkillsPython: true,
     });
   });
 
@@ -25,6 +43,7 @@ describe("detectChangedScope", () => {
       runMacos: false,
       runAndroid: false,
       runWindows: false,
+      runSkillsPython: false,
     });
   });
 
@@ -34,6 +53,7 @@ describe("detectChangedScope", () => {
       runMacos: false,
       runAndroid: false,
       runWindows: true,
+      runSkillsPython: false,
     });
   });
 
@@ -43,12 +63,14 @@ describe("detectChangedScope", () => {
       runMacos: true,
       runAndroid: false,
       runWindows: false,
+      runSkillsPython: false,
     });
     expect(detectChangedScope(["apps/shared/OpenClawKit/Sources/Foo.swift"])).toEqual({
       runNode: false,
       runMacos: true,
       runAndroid: true,
       runWindows: false,
+      runSkillsPython: false,
     });
   });
 
@@ -59,6 +81,7 @@ describe("detectChangedScope", () => {
         runMacos: false,
         runAndroid: false,
         runWindows: false,
+        runSkillsPython: false,
       },
     );
   });
@@ -69,6 +92,7 @@ describe("detectChangedScope", () => {
       runMacos: false,
       runAndroid: false,
       runWindows: false,
+      runSkillsPython: false,
     });
 
     expect(detectChangedScope(["assets/icon.png"])).toEqual({
@@ -76,6 +100,7 @@ describe("detectChangedScope", () => {
       runMacos: false,
       runAndroid: false,
       runWindows: false,
+      runSkillsPython: false,
     });
   });
 
@@ -85,6 +110,33 @@ describe("detectChangedScope", () => {
       runMacos: false,
       runAndroid: false,
       runWindows: false,
+      runSkillsPython: false,
     });
+  });
+
+  it("runs Python skill tests when skills change", () => {
+    expect(detectChangedScope(["skills/openai-image-gen/scripts/test_gen.py"])).toEqual({
+      runNode: true,
+      runMacos: false,
+      runAndroid: false,
+      runWindows: false,
+      runSkillsPython: true,
+    });
+  });
+
+  it("treats base and head as literal git args", () => {
+    const markerPath = path.join(
+      os.tmpdir(),
+      `openclaw-ci-changed-scope-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    markerPaths.push(markerPath);
+
+    const injectedBase =
+      process.platform === "win32"
+        ? `HEAD & echo injected > "${markerPath}" & rem`
+        : `HEAD; touch "${markerPath}" #`;
+
+    expect(() => listChangedPaths(injectedBase, "HEAD")).toThrow();
+    expect(fs.existsSync(markerPath)).toBe(false);
   });
 });

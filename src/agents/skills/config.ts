@@ -7,6 +7,7 @@ import {
   resolveConfigPath,
   resolveRuntimePlatform,
 } from "../../shared/config-eval.js";
+import { normalizeStringEntries } from "../../shared/string-normalization.js";
 import { resolveSkillKey } from "./frontmatter.js";
 
 const DEFAULT_CONFIG_VALUES: Record<string, boolean> = {
@@ -42,7 +43,7 @@ function normalizeAllowlist(input: unknown): string[] | undefined {
   if (!Array.isArray(input)) {
     return undefined;
   }
-  const normalized = input.map((entry) => String(entry).trim()).filter(Boolean);
+  const normalized = normalizeStringEntries(input);
   return normalized.length > 0 ? normalized : undefined;
 }
 
