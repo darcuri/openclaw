@@ -187,7 +187,7 @@ function appendCronDeliveryInstruction(params: {
   if (!params.deliveryRequested) {
     return params.commandBody;
   }
-  return `${params.commandBody}\n\nReturn your summary as plain text; it will be delivered automatically. If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
+  return `${params.commandBody}\n\nReturn your summary as plain text; it will be delivered automatically. Do not call message.send back to this same destination. If the task explicitly calls for messaging a different external recipient, note who/where it should go instead of sending it yourself.`.trim();
 }
 
 export async function runCronIsolatedAgentTurn(params: {

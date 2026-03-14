@@ -286,6 +286,12 @@ type ResolvedActionContext = {
   resolvedTarget?: ResolvedMessagingTarget;
   abortSignal?: AbortSignal;
 };
+
+function normalizeOptionalSessionKey(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
 function resolveGateway(input: RunMessageActionParams): MessageActionRunnerGateway | undefined {
   if (!input.gateway) {
     return undefined;
@@ -516,6 +522,12 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   if (agentId) {
     params.__agentId = agentId;
   }
+  const sourceSessionKey = normalizeOptionalSessionKey(input.sessionKey);
+  const outboundSessionKey = outboundRoute?.sessionKey;
+  const mirrorSessionKey =
+    sourceSessionKey && sourceSessionKey === outboundSessionKey
+      ? undefined
+      : (sourceSessionKey ?? outboundSessionKey);
   const mirrorMediaUrls =
     mergedMediaUrls.length > 0 ? mergedMediaUrls : mediaUrl ? [mediaUrl] : undefined;
   throwIfAborted(abortSignal);
@@ -531,9 +543,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       deps: input.deps,
       dryRun,
       mirror:
-        outboundRoute && !dryRun
+        mirrorSessionKey && !dryRun
           ? {
-              sessionKey: outboundRoute.sessionKey,
+              sessionKey: mirrorSessionKey,
               agentId,
               text: message,
               mediaUrls: mirrorMediaUrls,
