@@ -1,18 +1,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { OpenClawConfig } from "../config/config.js";
-import type { SessionEntry } from "../config/sessions.js";
-import type { SessionScope } from "../config/sessions/types.js";
+import { listTelegramAccountIds } from "../../extensions/telegram/src/accounts.js";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   resolveLegacyStateDirs,
   resolveNewStateDir,
   resolveOAuthDir,
   resolveStateDir,
 } from "../config/paths.js";
+import type { SessionEntry } from "../config/sessions.js";
 import { saveSessionStore } from "../config/sessions.js";
 import { canonicalizeMainSessionAlias } from "../config/sessions/main-session.js";
+import type { SessionScope } from "../config/sessions/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveChannelAllowFromPath } from "../pairing/pairing-store.js";
 import {
@@ -21,7 +22,6 @@ import {
   DEFAULT_MAIN_KEY,
   normalizeAgentId,
 } from "../routing/session-key.js";
-import { listTelegramAccountIds } from "../telegram/accounts.js";
 import { isWithinDir } from "./path-safety.js";
 import {
   ensureDir,

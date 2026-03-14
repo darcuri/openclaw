@@ -1,7 +1,8 @@
-import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import fs from "node:fs/promises";
-import type { ImageSanitizationLimits } from "../image-sanitization.js";
+import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { detectMime } from "../../media/mime.js";
+import { readSnakeCaseParamRaw } from "../../param-key.js";
+import type { ImageSanitizationLimits } from "../image-sanitization.js";
 import { sanitizeToolResultImages } from "../tool-images.js";
 
 // oxlint-disable-next-line typescript/no-explicit-any
@@ -53,22 +54,8 @@ export function createActionGate<T extends Record<string, boolean | undefined>>(
   };
 }
 
-function toSnakeCaseKey(key: string): string {
-  return key
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .toLowerCase();
-}
-
 function readParamRaw(params: Record<string, unknown>, key: string): unknown {
-  if (Object.hasOwn(params, key)) {
-    return params[key];
-  }
-  const snakeKey = toSnakeCaseKey(key);
-  if (snakeKey !== key && Object.hasOwn(params, snakeKey)) {
-    return params[snakeKey];
-  }
-  return undefined;
+  return readSnakeCaseParamRaw(params, key);
 }
 
 export function readStringParam(

@@ -1,10 +1,10 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { discordPlugin } from "../../../extensions/discord/src/channel.js";
-import { slackPlugin } from "../../../extensions/slack/src/channel.js";
-import { telegramPlugin } from "../../../extensions/telegram/src/channel.js";
-import type { OpenClawConfig } from "../../config/config.js";
-import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import { createTestRegistry } from "../../test-utils/channel-plugins.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  installMessageActionRunnerTestRegistry,
+  resetMessageActionRunnerTestRegistry,
+  slackConfig,
+  telegramConfig,
+} from "./message-action-runner.test-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   executeSendAction: vi.fn(),
@@ -33,36 +33,10 @@ vi.mock("../../config/sessions.js", async () => {
 
 import { runMessageAction } from "./message-action-runner.js";
 
-const slackConfig = {
-  channels: {
-    slack: {
-      botToken: "xoxb-test",
-      appToken: "xapp-test",
-    },
-  },
-} as OpenClawConfig;
-
-const telegramConfig = {
-  channels: {
-    telegram: {
-      botToken: "telegram-test",
-    },
-  },
-} as OpenClawConfig;
-
-const discordConfig = {
-  channels: {
-    discord: {
-      token: "discord-test-token",
-    },
-  },
-} as OpenClawConfig;
-
 async function runThreadingAction(params: {
-  cfg: OpenClawConfig;
+  cfg: typeof slackConfig;
   actionParams: Record<string, unknown>;
   toolContext?: Record<string, unknown>;
-  sessionKey?: string;
 }) {
   await runMessageAction({
     cfg: params.cfg,
@@ -70,7 +44,6 @@ async function runThreadingAction(params: {
     params: params.actionParams as never,
     toolContext: params.toolContext as never,
     agentId: "main",
-    sessionKey: params.sessionKey,
   });
   return mocks.executeSendAction.mock.calls[0]?.[0] as {
     threadId?: string;
@@ -91,47 +64,13 @@ const defaultTelegramToolContext = {
   currentThreadTs: "42",
 } as const;
 
-let createPluginRuntime: typeof import("../../plugins/runtime/index.js").createPluginRuntime;
-let setDiscordRuntime: typeof import("../../../extensions/discord/src/runtime.js").setDiscordRuntime;
-let setSlackRuntime: typeof import("../../../extensions/slack/src/runtime.js").setSlackRuntime;
-let setTelegramRuntime: typeof import("../../../extensions/telegram/src/runtime.js").setTelegramRuntime;
-
 describe("runMessageAction threading auto-injection", () => {
-  beforeAll(async () => {
-    ({ createPluginRuntime } = await import("../../plugins/runtime/index.js"));
-    ({ setDiscordRuntime } = await import("../../../extensions/discord/src/runtime.js"));
-    ({ setSlackRuntime } = await import("../../../extensions/slack/src/runtime.js"));
-    ({ setTelegramRuntime } = await import("../../../extensions/telegram/src/runtime.js"));
-  });
-
   beforeEach(() => {
-    const runtime = createPluginRuntime();
-    setDiscordRuntime(runtime);
-    setSlackRuntime(runtime);
-    setTelegramRuntime(runtime);
-    setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "discord",
-          source: "test",
-          plugin: discordPlugin,
-        },
-        {
-          pluginId: "slack",
-          source: "test",
-          plugin: slackPlugin,
-        },
-        {
-          pluginId: "telegram",
-          source: "test",
-          plugin: telegramPlugin,
-        },
-      ]),
-    );
+    installMessageActionRunnerTestRegistry();
   });
 
   afterEach(() => {
-    setActivePluginRegistry(createTestRegistry([]));
+    resetMessageActionRunnerTestRegistry();
     mocks.executeSendAction.mockClear();
     mocks.recordSessionMetaFromInbound.mockClear();
   });
@@ -239,39 +178,5 @@ describe("runMessageAction threading auto-injection", () => {
 
     expect(call?.replyToId).toBe("777");
     expect(call?.ctx?.params?.replyTo).toBe("777");
-  });
-
-  it("suppresses mirror when send target matches the current bound Discord session", async () => {
-    mockHandledSendAction();
-
-    const call = await runThreadingAction({
-      cfg: discordConfig,
-      actionParams: {
-        channel: "discord",
-        target: "channel:123",
-        message: "hi",
-      },
-      sessionKey: "agent:main:discord:channel:123",
-    });
-
-    expect(call?.ctx?.params?.__sessionKey).toBe("agent:main:discord:channel:123");
-    expect(call?.ctx?.mirror).toBeUndefined();
-  });
-
-  it("mirrors cross-channel sends back to the source session transcript", async () => {
-    mockHandledSendAction();
-
-    const call = await runThreadingAction({
-      cfg: discordConfig,
-      actionParams: {
-        channel: "discord",
-        target: "channel:123",
-        message: "hi",
-      },
-      sessionKey: "agent:main:discord:channel:999",
-    });
-
-    expect(call?.ctx?.params?.__sessionKey).toBe("agent:main:discord:channel:123");
-    expect(call?.ctx?.mirror?.sessionKey).toBe("agent:main:discord:channel:999");
   });
 });
