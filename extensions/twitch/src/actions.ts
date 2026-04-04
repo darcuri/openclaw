@@ -4,9 +4,9 @@
  * Handles tool-based actions for Twitch, such as sending messages.
  */
 
-import type { ChannelMessageActionAdapter, ChannelMessageActionContext } from "./types.js";
-import { DEFAULT_ACCOUNT_ID, getAccountConfig } from "./config.js";
+import { resolveTwitchAccountContext } from "./config.js";
 import { twitchOutbound } from "./outbound.js";
+import type { ChannelMessageActionAdapter, ChannelMessageActionContext } from "./types.js";
 
 /**
  * Create a tool result with error content.
@@ -68,7 +68,7 @@ export const twitchMessageActions: ChannelMessageActionAdapter = {
   /**
    * List available actions for this channel.
    */
-  listActions: () => [...TWITCH_ACTIONS],
+  describeMessageTool: () => ({ actions: [...TWITCH_ACTIONS] }),
 
   /**
    * Check if an action is supported.
@@ -130,12 +130,12 @@ export const twitchMessageActions: ChannelMessageActionAdapter = {
 
     const message = readStringParam(ctx.params, "message", { required: true });
     const to = readStringParam(ctx.params, "to", { required: false });
-    const accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+    const accountId = ctx.accountId ?? resolveTwitchAccountContext(ctx.cfg).accountId;
 
-    const account = getAccountConfig(ctx.cfg, accountId);
+    const { account, availableAccountIds } = resolveTwitchAccountContext(ctx.cfg, accountId);
     if (!account) {
       return errorResponse(
-        `Account not found: ${accountId}. Available accounts: ${Object.keys(ctx.cfg.channels?.twitch?.accounts ?? {}).join(", ") || "none"}`,
+        `Account not found: ${accountId}. Available accounts: ${availableAccountIds.join(", ") || "none"}`,
       );
     }
 

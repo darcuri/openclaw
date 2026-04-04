@@ -324,6 +324,34 @@ describe("web_fetch extraction fallbacks", () => {
     expect(authHeader).toBe("Bearer firecrawl-test-key");
   });
 
+  it("uses guarded endpoint fetch for firecrawl requests", async () => {
+    vi.stubEnv("HTTP_PROXY", "http://127.0.0.1:7890");
+
+    const fetchSpy = installMockFetch((input: RequestInfo | URL) => {
+      const url = resolveRequestUrl(input);
+      if (url.includes("api.firecrawl.dev/v2/scrape")) {
+        return Promise.resolve(
+          firecrawlResponse("firecrawl guarded transport"),
+        ) as Promise<Response>;
+      }
+      return Promise.resolve(
+        htmlResponse("<!doctype html><html><head></head><body></body></html>", url),
+      ) as Promise<Response>;
+    });
+
+    const tool = createFirecrawlTool();
+    const result = await executeFetch(tool, { url: "https://example.com/guarded-firecrawl" });
+
+    expect(result?.details).toMatchObject({ extractor: "firecrawl" });
+    const firecrawlCall = fetchSpy.mock.calls.find((call) =>
+      resolveRequestUrl(call[0]).includes("/v2/scrape"),
+    );
+    expect(firecrawlCall).toBeTruthy();
+    const requestInit = firecrawlCall?.[1] as (RequestInit & { dispatcher?: unknown }) | undefined;
+    expect(requestInit?.dispatcher).toBeDefined();
+    expect(requestInit?.dispatcher).toBeInstanceOf(EnvHttpProxyAgent);
+  });
+
   it("throws when readability is disabled and firecrawl is unavailable", async () => {
     installMockFetch(
       (input: RequestInfo | URL) =>
@@ -356,7 +384,29 @@ describe("web_fetch extraction fallbacks", () => {
     const tool = createFirecrawlTool();
     await expect(
       executeFetch(tool, { url: "https://example.com/readability-empty" }),
-    ).rejects.toThrow("Readability and Firecrawl returned no content");
+    ).rejects.toThrow("Readability, Firecrawl, and basic HTML cleanup returned no content");
+  });
+
+  it("falls back to basic HTML cleanup after readability and before giving up", async () => {
+    installMockFetch(
+      (input: RequestInfo | URL) =>
+        Promise.resolve(
+          htmlResponse(
+            "<!doctype html><html><head><title>Shell App</title></head><body><div id='app'></div></body></html>",
+            resolveRequestUrl(input),
+          ),
+        ) as Promise<Response>,
+    );
+
+    const tool = createFetchTool({
+      firecrawl: { enabled: false },
+    });
+    const result = await executeFetch(tool, { url: "https://example.com/shell" });
+    const details = result?.details as { extractor?: string; text?: string; title?: string };
+
+    expect(details.extractor).toBe("raw-html");
+    expect(details.text).toContain("Shell App");
+    expect(details.title).toContain("Shell App");
   });
 
   it("uses firecrawl when direct fetch fails", async () => {

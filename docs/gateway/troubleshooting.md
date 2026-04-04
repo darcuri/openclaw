@@ -109,11 +109,17 @@ Look for:
 Common signatures:
 
 - `device identity required` → non-secure context or missing device auth.
+- `origin not allowed` → browser `Origin` is not in `gateway.controlUi.allowedOrigins`
+  (or you are connecting from a non-loopback browser origin without an explicit
+  allowlist).
 - `device nonce required` / `device nonce mismatch` → client is not completing the
   challenge-based device auth flow (`connect.challenge` + `device.nonce`).
 - `device signature invalid` / `device signature expired` → client signed the wrong
   payload (or stale timestamp) for the current handshake.
 - `AUTH_TOKEN_MISMATCH` with `canRetryWithDeviceToken=true` → client can do one trusted retry with cached device token.
+- `too many failed authentication attempts (retry later)` from a browser-origin
+  loopback client → repeated failures from that same normalized `Origin` are
+  locked out temporarily; another localhost origin uses a separate bucket.
 - repeated `unauthorized` after that retry → shared token/device token drift; refresh token config and re-approve/rotate device token if needed.
 - `gateway connect failed:` → wrong host/port/url target.
 
@@ -145,7 +151,8 @@ If logs show nonce/signature errors, update the connecting client and verify it:
 Related:
 
 - [/web/control-ui](/web/control-ui)
-- [/gateway/authentication](/gateway/authentication)
+- [/gateway/configuration](/gateway/configuration) (gateway auth modes)
+- [/gateway/trusted-proxy-auth](/gateway/trusted-proxy-auth)
 - [/gateway/remote](/gateway/remote)
 - [/cli/devices](/cli/devices)
 
@@ -169,8 +176,8 @@ Look for:
 
 Common signatures:
 
-- `Gateway start blocked: set gateway.mode=local` → local gateway mode is not enabled. Fix: set `gateway.mode="local"` in your config (or run `openclaw configure`). If you are running OpenClaw via Podman using the dedicated `openclaw` user, the config lives at `~openclaw/.openclaw/openclaw.json`.
-- `refusing to bind gateway ... without auth` → non-loopback bind without token/password.
+- `Gateway start blocked: set gateway.mode=local` or `existing config is missing gateway.mode` → local gateway mode is not enabled, or the config file was clobbered and lost `gateway.mode`. Fix: set `gateway.mode="local"` in your config, or re-run `openclaw onboard --mode local` / `openclaw setup` to restamp the expected local-mode config. If you are running OpenClaw via Podman, the default config path is `~/.openclaw/openclaw.json`.
+- `refusing to bind gateway ... without auth` → non-loopback bind without a valid gateway auth path (token/password, or trusted-proxy where configured).
 - `another gateway instance is already listening` / `EADDRINUSE` → port conflict.
 
 Related:
@@ -238,7 +245,7 @@ Common signatures:
 
 Related:
 
-- [/automation/troubleshooting](/automation/troubleshooting)
+- [/automation/cron-jobs#troubleshooting](/automation/cron-jobs#troubleshooting)
 - [/automation/cron-jobs](/automation/cron-jobs)
 - [/gateway/heartbeat](/gateway/heartbeat)
 
@@ -287,21 +294,30 @@ openclaw doctor
 
 Look for:
 
+- Whether `plugins.allow` is set and includes `browser`.
 - Valid browser executable path.
 - CDP profile reachability.
-- Extension relay tab attachment for `profile="chrome-relay"`.
+- Local Chrome availability for `existing-session` / `user` profiles.
 
 Common signatures:
 
+- `unknown command "browser"` or `unknown command 'browser'` → the bundled browser plugin is excluded by `plugins.allow`.
+- browser tool missing / unavailable while `browser.enabled=true` → `plugins.allow` excludes `browser`, so the plugin never loaded.
 - `Failed to start Chrome CDP on port` → browser process failed to launch.
 - `browser.executablePath not found` → configured path is invalid.
-- `Chrome extension relay is running, but no tab is connected` → extension relay not attached.
-- `Browser attachOnly is enabled ... not reachable` → attach-only profile has no reachable target.
+- `browser.cdpUrl must be http(s) or ws(s)` → the configured CDP URL uses an unsupported scheme such as `file:` or `ftp:`.
+- `browser.cdpUrl has invalid port` → the configured CDP URL has a bad or out-of-range port.
+- `No Chrome tabs found for profile="user"` → the Chrome MCP attach profile has no open local Chrome tabs.
+- `Remote CDP for profile "<name>" is not reachable` → the configured remote CDP endpoint is not reachable from the gateway host.
+- `Browser attachOnly is enabled ... not reachable` or `Browser attachOnly is enabled and CDP websocket ... is not reachable` → attach-only profile has no reachable target, or the HTTP endpoint answered but the CDP WebSocket still could not be opened.
+- `Playwright is not available in this gateway build; '<feature>' is unsupported.` → the current gateway install lacks the full Playwright package; ARIA snapshots and basic page screenshots can still work, but navigation, AI snapshots, CSS-selector element screenshots, and PDF export stay unavailable.
+- `fullPage is not supported for element screenshots` → screenshot request mixed `--full-page` with `--ref` or `--element`.
+- `element screenshots are not supported for existing-session profiles; use ref from snapshot.` → Chrome MCP / `existing-session` screenshot calls must use page capture or a snapshot `--ref`, not CSS `--element`.
+- stale viewport / dark-mode / locale / offline overrides on attach-only or remote CDP profiles → run `openclaw browser stop --browser-profile <name>` to close the active control session and release Playwright/CDP emulation state without restarting the whole gateway.
 
 Related:
 
 - [/tools/browser-linux-troubleshooting](/tools/browser-linux-troubleshooting)
-- [/tools/chrome-extension](/tools/chrome-extension)
 - [/tools/browser](/tools/browser)
 
 ## If you upgraded and something suddenly broke

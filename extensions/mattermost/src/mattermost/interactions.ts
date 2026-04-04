@@ -1,12 +1,9 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import {
-  isTrustedProxyAddress,
-  resolveClientIp,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk/mattermost";
+import { safeEqualSecret } from "openclaw/plugin-sdk/browser-support";
 import { getMattermostRuntime } from "../runtime.js";
 import { updateMattermostPost, type MattermostClient, type MattermostPost } from "./client.js";
+import { isTrustedProxyAddress, resolveClientIp, type OpenClawConfig } from "./runtime-api.js";
 
 const INTERACTION_MAX_BODY_BYTES = 64 * 1024;
 const INTERACTION_BODY_TIMEOUT_MS = 10_000;
@@ -36,6 +33,10 @@ export type MattermostInteractionResponse = {
   };
   ephemeral_text?: string;
 };
+
+export type MattermostInteractionAuthorizationResult =
+  | { ok: true }
+  | { ok: false; statusCode?: number; response?: MattermostInteractionResponse };
 
 export type MattermostInteractiveButtonInput = {
   id?: string;
@@ -223,10 +224,7 @@ export function verifyInteractionToken(
   accountId?: string,
 ): boolean {
   const expected = generateInteractionToken(context, accountId);
-  if (expected.length !== token.length) {
-    return false;
-  }
-  return timingSafeEqual(Buffer.from(expected), Buffer.from(token));
+  return safeEqualSecret(expected, token);
 }
 
 // ── Button builder helpers ─────────────────────────────────────────────
@@ -404,6 +402,10 @@ export function createMattermostInteractionHandler(params: {
     context: Record<string, unknown>;
     post: MattermostPost;
   }) => Promise<MattermostInteractionResponse | null>;
+  authorizeButtonClick?: (opts: {
+    payload: MattermostInteractionPayload;
+    post: MattermostPost;
+  }) => Promise<MattermostInteractionAuthorizationResult>;
   dispatchButtonClick?: (opts: {
     channelId: string;
     userId: string;
@@ -565,6 +567,33 @@ export function createMattermostInteractionHandler(params: {
       `mattermost interaction: action=${actionId} user=${payload.user_name ?? payload.user_id} ` +
         `post=${payload.post_id} channel=${payload.channel_id}`,
     );
+
+    if (params.authorizeButtonClick) {
+      try {
+        const authorization = await params.authorizeButtonClick({
+          payload,
+          post: originalPost,
+        });
+        if (!authorization.ok) {
+          res.statusCode = authorization.statusCode ?? 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify(
+              authorization.response ?? {
+                ephemeral_text: "You are not allowed to use this action here.",
+              },
+            ),
+          );
+          return;
+        }
+      } catch (err) {
+        log?.(`mattermost interaction: authorization failed: ${String(err)}`);
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Interaction authorization failed" }));
+        return;
+      }
+    }
 
     if (params.handleInteraction) {
       try {

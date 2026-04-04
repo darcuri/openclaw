@@ -7,11 +7,13 @@ import {
 import { doctorCommand } from "../../commands/doctor.js";
 import {
   readConfigFileSnapshot,
+  replaceConfigFile,
   resolveGatewayPort,
-  writeConfigFile,
 } from "../../config/config.js";
 import { formatConfigIssueLines } from "../../config/issue-format.js";
+import { asResolvedSourceConfig, asRuntimeConfig } from "../../config/materialize.js";
 import { resolveGatewayService } from "../../daemon/service.js";
+import { nodeVersionSatisfiesEngine } from "../../infra/runtime-guard.js";
 import {
   channelToNpmTag,
   DEFAULT_GIT_CHANNEL,
@@ -20,15 +22,19 @@ import {
 } from "../../infra/update-channels.js";
 import {
   compareSemverStrings,
+  fetchNpmPackageTargetStatus,
   resolveNpmChannelTag,
   checkUpdateStatus,
 } from "../../infra/update-check.js";
 import {
+  collectInstalledGlobalPackageErrors,
+  canResolveRegistryVersionForPackageTarget,
   createGlobalInstallEnv,
   cleanupGlobalRenameDirs,
   globalInstallArgs,
+  resolveExpectedInstalledVersionFromSpec,
+  resolveGlobalInstallTarget,
   resolveGlobalInstallSpec,
-  resolveGlobalPackageRoot,
 } from "../../infra/update-global.js";
 import { runGatewayUpdate, type UpdateRunResult } from "../../infra/update-runner.js";
 import { syncPluginsForUpdateChannel, updateNpmInstalledPlugins } from "../../plugins/update.js";
@@ -72,9 +78,7 @@ const SERVICE_REFRESH_TIMEOUT_MS = 60_000;
 const SERVICE_REFRESH_PATH_ENV_KEYS = [
   "OPENCLAW_HOME",
   "OPENCLAW_STATE_DIR",
-  "CLAWDBOT_STATE_DIR",
   "OPENCLAW_CONFIG_PATH",
-  "CLAWDBOT_CONFIG_PATH",
 ] as const;
 
 const UPDATE_QUIPS = [
@@ -132,6 +136,38 @@ function tryResolveInvocationCwd(): string | undefined {
   }
 }
 
+async function resolvePackageRuntimePreflightError(params: {
+  tag: string;
+  timeoutMs?: number;
+}): Promise<string | null> {
+  if (!canResolveRegistryVersionForPackageTarget(params.tag)) {
+    return null;
+  }
+  const target = params.tag.trim();
+  if (!target) {
+    return null;
+  }
+  const status = await fetchNpmPackageTargetStatus({
+    target,
+    timeoutMs: params.timeoutMs,
+  });
+  if (status.error) {
+    return null;
+  }
+  const satisfies = nodeVersionSatisfiesEngine(process.versions.node ?? null, status.nodeEngine);
+  if (satisfies !== false) {
+    return null;
+  }
+  const targetLabel = status.version ?? target;
+  return [
+    `Node ${process.versions.node ?? "unknown"} is too old for openclaw@${targetLabel}.`,
+    `The requested package requires ${status.nodeEngine}.`,
+    "Upgrade Node to 22.14+ or Node 24, then rerun `openclaw update`.",
+    "Bare `npm i -g openclaw` can silently install an older compatible release.",
+    "After upgrading Node, use `npm i -g openclaw@latest`.",
+  ].join("\n");
+}
+
 function resolveServiceRefreshEnv(
   env: NodeJS.ProcessEnv,
   invocationCwd?: string,
@@ -177,7 +213,7 @@ type UpdateDryRunPreview = {
 
 function printDryRunPreview(preview: UpdateDryRunPreview, jsonMode: boolean): void {
   if (jsonMode) {
-    defaultRuntime.log(JSON.stringify(preview, null, 2));
+    defaultRuntime.writeJson(preview);
     return;
   }
 
@@ -314,8 +350,13 @@ async function runPackageInstallUpdate(params: {
   });
   const installEnv = await createGlobalInstallEnv();
   const runCommand = createGlobalCommandRunner();
-
-  const pkgRoot = await resolveGlobalPackageRoot(manager, runCommand, params.timeoutMs);
+  const installTarget = await resolveGlobalInstallTarget({
+    manager,
+    runCommand,
+    timeoutMs: params.timeoutMs,
+    pkgRoot: params.root,
+  });
+  const pkgRoot = installTarget.packageRoot;
   const packageName =
     (pkgRoot ? await readPackageName(pkgRoot) : await readPackageName(params.root)) ??
     DEFAULT_PACKAGE_NAME;
@@ -335,7 +376,7 @@ async function runPackageInstallUpdate(params: {
 
   const updateStep = await runUpdateStep({
     name: "global update",
-    argv: globalInstallArgs(manager, installSpec),
+    argv: globalInstallArgs(installTarget, installSpec),
     env: installEnv,
     timeoutMs: params.timeoutMs,
     progress: params.progress,
@@ -344,9 +385,33 @@ async function runPackageInstallUpdate(params: {
   const steps = [updateStep];
   let afterVersion = beforeVersion;
 
-  if (pkgRoot) {
-    afterVersion = await readPackageVersion(pkgRoot);
-    const entryPath = path.join(pkgRoot, "dist", "entry.js");
+  const verifiedPackageRoot =
+    (
+      await resolveGlobalInstallTarget({
+        manager: installTarget,
+        runCommand,
+        timeoutMs: params.timeoutMs,
+      })
+    ).packageRoot ?? pkgRoot;
+  if (verifiedPackageRoot) {
+    afterVersion = await readPackageVersion(verifiedPackageRoot);
+    const expectedVersion = resolveExpectedInstalledVersionFromSpec(packageName, installSpec);
+    const verificationErrors = await collectInstalledGlobalPackageErrors({
+      packageRoot: verifiedPackageRoot,
+      expectedVersion,
+    });
+    if (verificationErrors.length > 0) {
+      steps.push({
+        name: "global install verify",
+        command: `verify ${verifiedPackageRoot}`,
+        cwd: verifiedPackageRoot,
+        durationMs: 0,
+        exitCode: 1,
+        stderrTail: verificationErrors.join("\n"),
+        stdoutTail: null,
+      });
+    }
+    const entryPath = path.join(verifiedPackageRoot, "dist", "entry.js");
     if (await pathExists(entryPath)) {
       const doctorStep = await runUpdateStep({
         name: `${CLI_NAME} doctor`,
@@ -362,7 +427,7 @@ async function runPackageInstallUpdate(params: {
   return {
     status: failedStep ? "error" : "ok",
     mode: manager,
-    root: pkgRoot ?? params.root,
+    root: verifiedPackageRoot ?? params.root,
     reason: failedStep ? failedStep.name : undefined,
     before: { version: beforeVersion },
     after: { version: afterVersion },
@@ -386,10 +451,12 @@ async function runGitUpdate(params: {
 }): Promise<UpdateRunResult> {
   const updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? 20 * 60_000;
+  const installEnv = await createGlobalInstallEnv();
 
   const cloneStep = params.switchToGit
     ? await ensureGitCheckout({
         dir: updateRoot,
+        env: installEnv,
         timeoutMs: effectiveTimeout,
         progress: params.progress,
       })
@@ -426,11 +493,18 @@ async function runGitUpdate(params: {
       installKind: params.installKind,
       timeoutMs: effectiveTimeout,
     });
+    const runCommand = createGlobalCommandRunner();
+    const installTarget = await resolveGlobalInstallTarget({
+      manager,
+      runCommand,
+      timeoutMs: effectiveTimeout,
+      pkgRoot: params.root,
+    });
     const installStep = await runUpdateStep({
       name: "global install",
-      argv: globalInstallArgs(manager, updateRoot),
+      argv: globalInstallArgs(installTarget, updateRoot),
       cwd: updateRoot,
-      env: await createGlobalInstallEnv(),
+      env: installEnv,
       timeoutMs: effectiveTimeout,
       progress: params.progress,
     });
@@ -494,7 +568,10 @@ async function updatePluginsAfterCoreUpdate(params: {
   pluginConfig = npmResult.config;
 
   if (syncResult.changed || npmResult.changed) {
-    await writeConfigFile(pluginConfig);
+    await replaceConfigFile({
+      nextConfig: pluginConfig,
+      baseHash: params.configSnapshot.hash,
+    });
   }
 
   if (params.opts.json) {
@@ -579,12 +656,14 @@ async function maybeRestartService(params: {
             invocationCwd: params.invocationCwd,
           });
         } catch (err) {
-          if (!params.opts.json) {
-            defaultRuntime.log(
-              theme.warn(
-                `Failed to refresh gateway service environment from updated install: ${String(err)}`,
-              ),
-            );
+          // Always log the refresh failure so callers can detect it (issue #56772).
+          // Previously this was silently suppressed in --json mode, hiding the root
+          // cause and preventing auto-update callers from detecting the failure.
+          const message = `Failed to refresh gateway service environment from updated install: ${String(err)}`;
+          if (params.opts.json) {
+            defaultRuntime.error(message);
+          } else {
+            defaultRuntime.log(theme.warn(message));
           }
         }
       }
@@ -731,22 +810,31 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   let targetVersion: string | null = null;
   let downgradeRisk = false;
   let fallbackToLatest = false;
+  let packageInstallSpec: string | null = null;
 
   if (updateInstallKind !== "git") {
     currentVersion = switchToPackage ? null : await readPackageVersion(root);
-    targetVersion = explicitTag
-      ? await resolveTargetVersion(tag, timeoutMs)
-      : await resolveNpmChannelTag({ channel, timeoutMs }).then((resolved) => {
-          tag = resolved.tag;
-          fallbackToLatest = channel === "beta" && resolved.tag === "latest";
-          return resolved.version;
-        });
+    if (explicitTag) {
+      targetVersion = await resolveTargetVersion(tag, timeoutMs);
+    } else {
+      targetVersion = await resolveNpmChannelTag({ channel, timeoutMs }).then((resolved) => {
+        tag = resolved.tag;
+        fallbackToLatest = channel === "beta" && resolved.tag === "latest";
+        return resolved.version;
+      });
+    }
     const cmp =
       currentVersion && targetVersion ? compareSemverStrings(currentVersion, targetVersion) : null;
     downgradeRisk =
+      canResolveRegistryVersionForPackageTarget(tag) &&
       !fallbackToLatest &&
       currentVersion != null &&
       (targetVersion == null || (cmp != null && cmp > 0));
+    packageInstallSpec = resolveGlobalInstallSpec({
+      packageName: DEFAULT_PACKAGE_NAME,
+      tag,
+      env: process.env,
+    });
   }
 
   if (opts.dryRun) {
@@ -772,7 +860,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     } else if (updateInstallKind === "git") {
       actions.push(`Run git update flow on channel ${channel} (fetch/rebase/build/doctor)`);
     } else {
-      actions.push(`Run global package manager update with spec openclaw@${tag}`);
+      actions.push(`Run global package manager update with spec ${packageInstallSpec ?? tag}`);
     }
     actions.push("Run plugin update sync after core update");
     actions.push("Refresh shell completion cache (if needed)");
@@ -789,6 +877,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (fallbackToLatest) {
       notes.push("Beta channel resolves to latest for this run (fallback).");
     }
+    if (explicitTag && !canResolveRegistryVersionForPackageTarget(tag)) {
+      notes.push("Non-registry package specs skip npm version lookup and downgrade previews.");
+    }
 
     printDryRunPreview(
       {
@@ -803,7 +894,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
         requestedChannel,
         storedChannel,
         effectiveChannel: channel,
-        tag,
+        tag: packageInstallSpec ?? tag,
         currentVersion,
         targetVersion,
         downgradeRisk,
@@ -848,17 +939,15 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     );
   }
 
-  if (requestedChannel && configSnapshot.valid) {
-    const next = {
-      ...configSnapshot.config,
-      update: {
-        ...configSnapshot.config.update,
-        channel: requestedChannel,
-      },
-    };
-    await writeConfigFile(next);
-    if (!opts.json) {
-      defaultRuntime.log(theme.muted(`Update channel set to ${requestedChannel}.`));
+  if (updateInstallKind === "package") {
+    const runtimePreflightError = await resolvePackageRuntimePreflightError({
+      tag,
+      timeoutMs,
+    });
+    if (runtimePreflightError) {
+      defaultRuntime.error(runtimePreflightError);
+      defaultRuntime.exit(1);
+      return;
     }
   }
 
@@ -945,10 +1034,37 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     return;
   }
 
+  let postUpdateConfigSnapshot = configSnapshot;
+  if (requestedChannel && configSnapshot.valid && requestedChannel !== storedChannel) {
+    const next = {
+      ...configSnapshot.config,
+      update: {
+        ...configSnapshot.config.update,
+        channel: requestedChannel,
+      },
+    };
+    await replaceConfigFile({
+      nextConfig: next,
+      baseHash: configSnapshot.hash,
+    });
+    postUpdateConfigSnapshot = {
+      ...configSnapshot,
+      hash: undefined,
+      parsed: next,
+      sourceConfig: asResolvedSourceConfig(next),
+      resolved: asResolvedSourceConfig(next),
+      runtimeConfig: asRuntimeConfig(next),
+      config: asRuntimeConfig(next),
+    };
+    if (!opts.json) {
+      defaultRuntime.log(theme.muted(`Update channel set to ${requestedChannel}.`));
+    }
+  }
+
   await updatePluginsAfterCoreUpdate({
     root,
     channel,
-    configSnapshot,
+    configSnapshot: postUpdateConfigSnapshot,
     opts,
   });
 

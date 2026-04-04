@@ -28,7 +28,7 @@ Auth is supplied during the WebSocket handshake via:
 - `connect.params.auth.token`
 - `connect.params.auth.password`
   The dashboard settings panel keeps a token for the current browser tab session and selected gateway URL; passwords are not persisted.
-  The onboarding wizard generates a gateway token by default, so paste it here on first connect.
+  Onboarding generates a gateway token by default, so paste it here on first connect.
 
 ## Device pairing (first connection)
 
@@ -48,6 +48,10 @@ openclaw devices list
 # Approve by request ID
 openclaw devices approve <requestId>
 ```
+
+If the browser retries pairing with changed auth details (role/scopes/public
+key), the previous pending request is superseded and a new `requestId` is
+created. Re-run `openclaw devices list` before approval.
 
 Once approved, the device is remembered and won't require re-approval unless
 you revoke it with `openclaw devices revoke --device <id> --role <role>`. See
@@ -83,7 +87,10 @@ The Control UI can localize itself on first load based on your browser locale, a
 - Config: view/edit `~/.openclaw/openclaw.json` (`config.get`, `config.set`)
 - Config: apply + restart with validation (`config.apply`) and wake the last active session
 - Config writes include a base-hash guard to prevent clobbering concurrent edits
-- Config schema + form rendering (`config.schema`, including plugin + channel schemas); Raw JSON editor remains available
+- Config writes (`config.set`/`config.apply`/`config.patch`) also preflight active SecretRef resolution for refs in the submitted config payload; unresolved active submitted refs are rejected before write
+- Config schema + form rendering (`config.schema`, including plugin + channel schemas); Raw JSON editor is available only when the snapshot has a safe raw round-trip
+- If a snapshot cannot safely round-trip raw text, Control UI forces Form mode and disables Raw mode for that snapshot
+- Structured SecretRef object values are rendered read-only in form text inputs to prevent accidental object-to-string corruption
 - Debug: status/health/models snapshots + event log + manual RPC calls (`status`, `health`, `models.list`)
 - Logs: live tail of gateway file logs with filter/export (`logs.tail`)
 - Update: run a package/git update + restart (`update.run`) with a restart report
@@ -134,8 +141,9 @@ By default, Control UI/WebSocket Serve requests can authenticate via Tailscale i
 verifies the identity by resolving the `x-forwarded-for` address with
 `tailscale whois` and matching it to the header, and only accepts these when the
 request hits loopback with Tailscale’s `x-forwarded-*` headers. Set
-`gateway.auth.allowTailscale: false` (or force `gateway.auth.mode: "password"`)
-if you want to require a token/password even for Serve traffic.
+`gateway.auth.allowTailscale: false` if you want to require explicit shared-secret
+credentials even for Serve traffic. Then use `gateway.auth.mode: "token"` or
+`"password"`.
 Tokenless Serve auth assumes the gateway host is trusted. If untrusted local
 code may run on that host, require token/password auth.
 
@@ -156,6 +164,12 @@ Paste the token into the UI settings (sent as `connect.params.auth.token`).
 If you open the dashboard over plain HTTP (`http://<lan-ip>` or `http://<tailscale-ip>`),
 the browser runs in a **non-secure context** and blocks WebCrypto. By default,
 OpenClaw **blocks** Control UI connections without device identity.
+
+Documented exceptions:
+
+- localhost-only insecure HTTP compatibility with `gateway.controlUi.allowInsecureAuth=true`
+- successful operator Control UI auth through `gateway.auth.mode: "trusted-proxy"`
+- break-glass `gateway.controlUi.dangerouslyDisableDeviceAuth=true`
 
 **Recommended fix:** use HTTPS (Tailscale Serve) or open the UI locally:
 
@@ -195,6 +209,14 @@ OpenClaw **blocks** Control UI connections without device identity.
 
 `dangerouslyDisableDeviceAuth` disables Control UI device identity checks and is a
 severe security downgrade. Revert quickly after emergency use.
+
+Trusted-proxy note:
+
+- successful trusted-proxy auth can admit **operator** Control UI sessions without
+  device identity
+- this does **not** extend to node-role Control UI sessions
+- same-host loopback reverse proxies still do not satisfy trusted-proxy auth; see
+  [Trusted Proxy Auth](/gateway/trusted-proxy-auth)
 
 See [Tailscale](/gateway/tailscale) for HTTPS setup guidance.
 
@@ -242,7 +264,7 @@ http://localhost:5173/?gatewayUrl=wss://<gateway-host>:18789#token=<gateway-toke
 Notes:
 
 - `gatewayUrl` is stored in localStorage after load and removed from the URL.
-- `token` is imported from the URL fragment, stored in sessionStorage for the current browser tab session and selected gateway URL, and stripped from the URL; it is not stored in localStorage.
+- `token` should be passed via the URL fragment (`#token=...`) whenever possible. Fragments are not sent to the server, which avoids request-log and Referer leakage. Legacy `?token=` query params are still imported once for compatibility, but only as a fallback, and are stripped immediately after bootstrap.
 - `password` is kept in memory only.
 - When `gatewayUrl` is set, the UI does not fall back to config or environment credentials.
   Provide `token` (or `password`) explicitly. Missing explicit credentials is an error.
@@ -250,6 +272,9 @@ Notes:
 - `gatewayUrl` is only accepted in a top-level window (not embedded) to prevent clickjacking.
 - Non-loopback Control UI deployments must set `gateway.controlUi.allowedOrigins`
   explicitly (full origins). This includes remote dev setups.
+- Do not use `gateway.controlUi.allowedOrigins: ["*"]` except for tightly controlled
+  local testing. It means allow any browser origin, not “match whatever host I am
+  using.”
 - `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true` enables
   Host-header origin fallback mode, but it is a dangerous security mode.
 
@@ -266,3 +291,10 @@ Example:
 ```
 
 Remote access setup details: [Remote access](/gateway/remote).
+
+## Related
+
+- [Dashboard](/web/dashboard) — gateway dashboard
+- [WebChat](/web/webchat) — browser-based chat interface
+- [TUI](/web/tui) — terminal user interface
+- [Health Checks](/gateway/health) — gateway health monitoring

@@ -2,16 +2,18 @@ import type { GatewayRequestHandlers } from "./types.js";
 import {
   approveDevicePairing,
   getPairedDevice,
+  listApprovedPairedDeviceRoles,
   listDevicePairing,
   removePairedDevice,
   type DeviceAuthToken,
+  type RotateDeviceTokenDenyReason,
   rejectDevicePairing,
   revokeDeviceToken,
   rotateDeviceToken,
   summarizeDeviceTokens,
 } from "../../infra/device-pairing.js";
 import { normalizeDeviceAuthScopes } from "../../shared/device-auth.js";
-import { roleScopesAllow } from "../../shared/operator-scope-compat.js";
+import { resolveMissingRequestedScope } from "../../shared/operator-scope-compat.js";
 import {
   ErrorCodes,
   errorShape,
@@ -24,6 +26,13 @@ import {
   validateDeviceTokenRotateParams,
 } from "../protocol/index.js";
 
+const DEVICE_TOKEN_ROTATION_DENIED_MESSAGE = "device token rotation denied";
+
+type DeviceTokenRotateTarget = {
+  pairedDevice: NonNullable<Awaited<ReturnType<typeof getPairedDevice>>>;
+  normalizedRole: string;
+};
+
 function redactPairedDevice(
   device: { tokens?: Record<string, DeviceAuthToken> } & Record<string, unknown>,
 ) {
@@ -34,23 +43,36 @@ function redactPairedDevice(
   };
 }
 
-function resolveMissingRequestedScope(params: {
+function logDeviceTokenRotationDenied(params: {
+  log: { warn: (message: string) => void };
+  deviceId: string;
   role: string;
-  requestedScopes: readonly string[];
-  callerScopes: readonly string[];
-}): string | null {
-  for (const scope of params.requestedScopes) {
-    if (
-      !roleScopesAllow({
-        role: params.role,
-        requestedScopes: [scope],
-        allowedScopes: params.callerScopes,
-      })
-    ) {
-      return scope;
-    }
+  reason: RotateDeviceTokenDenyReason | "caller-missing-scope" | "unknown-device-or-role";
+  scope?: string | null;
+}) {
+  const suffix = params.scope ? ` scope=${params.scope}` : "";
+  params.log.warn(
+    `device token rotation denied device=${params.deviceId} role=${params.role} reason=${params.reason}${suffix}`,
+  );
+}
+
+async function loadDeviceTokenRotateTarget(params: {
+  deviceId: string;
+  role: string;
+  log: { warn: (message: string) => void };
+}): Promise<DeviceTokenRotateTarget | null> {
+  const normalizedRole = params.role.trim();
+  const pairedDevice = await getPairedDevice(params.deviceId);
+  if (!pairedDevice || !listApprovedPairedDeviceRoles(pairedDevice).includes(normalizedRole)) {
+    logDeviceTokenRotationDenied({
+      log: params.log,
+      deviceId: params.deviceId,
+      role: params.role,
+      reason: "unknown-device-or-role",
+    });
+    return null;
   }
-  return null;
+  return { pairedDevice, normalizedRole };
 }
 
 export const deviceHandlers: GatewayRequestHandlers = {
@@ -78,7 +100,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
       undefined,
     );
   },
-  "device.pair.approve": async ({ params, respond, context }) => {
+  "device.pair.approve": async ({ params, respond, context, client }) => {
     if (!validateDevicePairApproveParams(params)) {
       respond(
         false,
@@ -93,9 +115,18 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const { requestId } = params as { requestId: string };
-    const approved = await approveDevicePairing(requestId);
+    const callerScopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
+    const approved = await approveDevicePairing(requestId, { callerScopes });
     if (!approved) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown requestId"));
+      return;
+    }
+    if (approved.status === "forbidden") {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, `missing scope: ${approved.missingScope}`),
+      );
       return;
     }
     context.logGateway.info(
@@ -167,6 +198,9 @@ export const deviceHandlers: GatewayRequestHandlers = {
     }
     context.logGateway.info(`device pairing removed device=${removed.deviceId}`);
     respond(true, removed, undefined);
+    queueMicrotask(() => {
+      context.disconnectClientsForDevice?.(removed.deviceId);
+    });
   },
   "device.token.rotate": async ({ params, respond, context, client }) => {
     if (!validateDeviceTokenRotateParams(params)) {
@@ -187,33 +221,60 @@ export const deviceHandlers: GatewayRequestHandlers = {
       role: string;
       scopes?: string[];
     };
-    const pairedDevice = await getPairedDevice(deviceId);
-    if (!pairedDevice) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId/role"));
+    const rotateTarget = await loadDeviceTokenRotateTarget({
+      deviceId,
+      role,
+      log: context.logGateway,
+    });
+    if (!rotateTarget) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
+      );
       return;
     }
+    const { pairedDevice, normalizedRole } = rotateTarget;
     const callerScopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
     const requestedScopes = normalizeDeviceAuthScopes(
-      scopes ?? pairedDevice.tokens?.[role.trim()]?.scopes ?? pairedDevice.scopes,
+      scopes ?? pairedDevice.tokens?.[normalizedRole]?.scopes ?? pairedDevice.scopes,
     );
     const missingScope = resolveMissingRequestedScope({
       role,
       requestedScopes,
-      callerScopes,
+      allowedScopes: callerScopes,
     });
     if (missingScope) {
+      logDeviceTokenRotationDenied({
+        log: context.logGateway,
+        deviceId,
+        role,
+        reason: "caller-missing-scope",
+        scope: missingScope,
+      });
       respond(
         false,
         undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `missing scope: ${missingScope}`),
+        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
       );
       return;
     }
-    const entry = await rotateDeviceToken({ deviceId, role, scopes });
-    if (!entry) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId/role"));
+    const rotated = await rotateDeviceToken({ deviceId, role, scopes });
+    if (!rotated.ok) {
+      logDeviceTokenRotationDenied({
+        log: context.logGateway,
+        deviceId,
+        role,
+        reason: rotated.reason,
+      });
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
+      );
       return;
     }
+    const entry = rotated.entry;
     context.logGateway.info(
       `device token rotated device=${deviceId} role=${entry.role} scopes=${entry.scopes.join(",")}`,
     );
@@ -228,6 +289,9 @@ export const deviceHandlers: GatewayRequestHandlers = {
       },
       undefined,
     );
+    queueMicrotask(() => {
+      context.disconnectClientsForDevice?.(deviceId.trim(), { role: entry.role });
+    });
   },
   "device.token.revoke": async ({ params, respond, context }) => {
     if (!validateDeviceTokenRevokeParams(params)) {
@@ -249,11 +313,19 @@ export const deviceHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId/role"));
       return;
     }
-    context.logGateway.info(`device token revoked device=${deviceId} role=${entry.role}`);
+    const normalizedDeviceId = deviceId.trim();
+    context.logGateway.info(`device token revoked device=${normalizedDeviceId} role=${entry.role}`);
     respond(
       true,
-      { deviceId, role: entry.role, revokedAtMs: entry.revokedAtMs ?? Date.now() },
+      {
+        deviceId: normalizedDeviceId,
+        role: entry.role,
+        revokedAtMs: entry.revokedAtMs ?? Date.now(),
+      },
       undefined,
     );
+    queueMicrotask(() => {
+      context.disconnectClientsForDevice?.(normalizedDeviceId, { role: entry.role });
+    });
   },
 };

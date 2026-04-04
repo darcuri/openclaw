@@ -21,6 +21,9 @@ openclaw devices list
 openclaw devices list --json
 ```
 
+Pending request output includes the requested role and scopes so approvals can
+be reviewed before you approve.
+
 ### `openclaw devices remove <deviceId>`
 
 Remove one paired device entry.
@@ -45,6 +48,11 @@ openclaw devices clear --yes --pending --json
 Approve a pending device pairing request. If `requestId` is omitted, OpenClaw
 automatically approves the most recent pending request.
 
+Note: if a device retries pairing with changed auth details (role/scopes/public
+key), OpenClaw supersedes the previous pending entry and issues a new
+`requestId`. Run `openclaw devices list` right before approval to use the
+current ID.
+
 ```
 openclaw devices approve
 openclaw devices approve <requestId>
@@ -62,10 +70,14 @@ openclaw devices reject <requestId>
 ### `openclaw devices rotate --device <id> --role <role> [--scope <scope...>]`
 
 Rotate a device token for a specific role (optionally updating scopes).
+The target role must already exist in that device's approved pairing contract;
+rotation cannot mint a new unapproved role.
 
 ```
 openclaw devices rotate --device <deviceId> --role operator --scope operator.read --scope operator.write
 ```
+
+Returns the new token payload as JSON.
 
 ### `openclaw devices revoke --device <id> --role <role>`
 
@@ -74,6 +86,8 @@ Revoke a device token for a specific role.
 ```
 openclaw devices revoke --device <deviceId> --role node
 ```
+
+Returns the revoke result as JSON.
 
 ## Common options
 
@@ -90,8 +104,12 @@ Pass `--token` or `--password` explicitly. Missing explicit credentials is an er
 
 - Token rotation returns a new token (sensitive). Treat it like a secret.
 - These commands require `operator.pairing` (or `operator.admin`) scope.
+- Token rotation stays inside the approved pairing role set and approved scope
+  baseline for that device. A stray cached token entry does not grant a new
+  rotate target.
 - `devices clear` is intentionally gated by `--yes`.
 - If pairing scope is unavailable on local loopback (and no explicit `--url` is passed), list/approve can use a local pairing fallback.
+- `devices approve` picks the newest pending request automatically when you omit `requestId` or pass `--latest`.
 
 ## Token drift recovery checklist
 

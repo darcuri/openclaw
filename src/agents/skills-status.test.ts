@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { SkillEntry } from "./skills/types.js";
 import { buildWorkspaceSkillStatus } from "./skills-status.js";
+import { createCanonicalFixtureSkill } from "./skills.test-helpers.js";
+import type { SkillEntry } from "./skills/types.js";
 
 describe("buildWorkspaceSkillStatus", () => {
   it("does not surface install options for OS-scoped skills on unsupported platforms", () => {
@@ -12,14 +13,13 @@ describe("buildWorkspaceSkillStatus", () => {
     const mismatchedOs = process.platform === "darwin" ? "linux" : "darwin";
 
     const entry: SkillEntry = {
-      skill: {
+      skill: createFixtureSkill({
         name: "os-scoped",
         description: "test",
-        source: "test",
         filePath: "/tmp/os-scoped",
         baseDir: "/tmp",
-        disableModelInvocation: false,
-      },
+        source: "test",
+      }),
       frontmatter: {},
       metadata: {
         os: [mismatchedOs],
@@ -41,3 +41,13 @@ describe("buildWorkspaceSkillStatus", () => {
     expect(report.skills[0]?.install).toEqual([]);
   });
 });
+
+function createFixtureSkill(params: {
+  name: string;
+  description: string;
+  filePath: string;
+  baseDir: string;
+  source: string;
+}): SkillEntry["skill"] {
+  return createCanonicalFixtureSkill(params);
+}

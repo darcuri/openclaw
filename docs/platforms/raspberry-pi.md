@@ -4,7 +4,7 @@ read_when:
   - Setting up OpenClaw on a Raspberry Pi
   - Running OpenClaw on ARM devices
   - Building a cheap always-on personal AI
-title: "Raspberry Pi"
+title: "Raspberry Pi (Platform)"
 ---
 
 # OpenClaw on Raspberry Pi
@@ -33,7 +33,7 @@ Perfect for:
 **Minimum specs:** 1GB RAM, 1 core, 500MB disk  
 **Recommended:** 2GB+ RAM, 64-bit OS, 16GB+ SD card (or USB SSD)
 
-## What You'll Need
+## What you need
 
 - Raspberry Pi 4 or 5 (2GB+ recommended)
 - MicroSD card (16GB+) or USB SSD (better performance)
@@ -146,11 +146,11 @@ Follow the wizard:
 # Check status
 openclaw status
 
-# Check service
-sudo systemctl status openclaw
+# Check service (standard install = systemd user unit)
+systemctl --user status openclaw-gateway.service
 
 # View logs
-journalctl -u openclaw -f
+journalctl --user -u openclaw-gateway.service -f
 ```
 
 ## 9) Access the OpenClaw Dashboard
@@ -221,7 +221,7 @@ If this Pi is mostly running OpenClaw, add a service drop-in to reduce restart
 jitter and keep startup env stable:
 
 ```bash
-sudo systemctl edit openclaw
+systemctl --user edit openclaw-gateway.service
 ```
 
 ```ini
@@ -236,12 +236,19 @@ TimeoutStartSec=90
 Then apply:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart openclaw
+systemctl --user daemon-reload
+systemctl --user restart openclaw-gateway.service
 ```
 
 If possible, keep OpenClaw state/cache on SSD-backed storage to avoid SD-card
 random-I/O bottlenecks during cold starts.
+
+If this is a headless Pi, enable lingering once so the user service survives
+logout:
+
+```bash
+sudo loginctl enable-linger "$(whoami)"
+```
 
 How `Restart=` policies help automated recovery:
 [systemd can automate service recovery](https://www.redhat.com/en/blog/systemd-automate-recovery).
@@ -307,8 +314,8 @@ Since the Pi is just the Gateway (models run in the cloud), use API-based models
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic/claude-sonnet-4-20250514",
-        "fallbacks": ["openai/gpt-4o-mini"]
+        "primary": "anthropic/claude-sonnet-4-6",
+        "fallbacks": ["openai/gpt-5.4-mini"]
       }
     }
   }
@@ -321,17 +328,17 @@ Since the Pi is just the Gateway (models run in the cloud), use API-based models
 
 ## Auto-Start on Boot
 
-The onboarding wizard sets this up, but to verify:
+Onboarding sets this up, but to verify:
 
 ```bash
 # Check service is enabled
-sudo systemctl is-enabled openclaw
+systemctl --user is-enabled openclaw-gateway.service
 
 # Enable if not
-sudo systemctl enable openclaw
+systemctl --user enable openclaw-gateway.service
 
 # Start on boot
-sudo systemctl start openclaw
+systemctl --user start openclaw-gateway.service
 ```
 
 ---
@@ -354,16 +361,16 @@ free -h
 - Disable unused services: `sudo systemctl disable cups bluetooth avahi-daemon`
 - Check CPU throttling: `vcgencmd get_throttled` (should return `0x0`)
 
-### Service Won't Start
+### Service will not start
 
 ```bash
 # Check logs
-journalctl -u openclaw --no-pager -n 100
+journalctl --user -u openclaw-gateway.service --no-pager -n 100
 
 # Common fix: rebuild
 cd ~/openclaw  # if using hackable install
 npm run build
-sudo systemctl restart openclaw
+systemctl --user restart openclaw-gateway.service
 ```
 
 ### ARM Binary Issues

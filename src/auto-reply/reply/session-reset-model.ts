@@ -1,7 +1,4 @@
-import type { OpenClawConfig } from "../../config/config.js";
-import type { SessionEntry } from "../../config/sessions.js";
-import type { MsgContext, TemplateContext } from "../templating.js";
-import { loadModelCatalog } from "../../agents/model-catalog.js";
+import { loadModelCatalog, type ModelCatalogEntry } from "../../agents/model-catalog.js";
 import {
   buildAllowedModelSet,
   modelKey,
@@ -9,8 +6,11 @@ import {
   resolveModelRefFromString,
   type ModelAliasIndex,
 } from "../../agents/model-selection.js";
+import type { OpenClawConfig } from "../../config/config.js";
+import type { SessionEntry } from "../../config/sessions.js";
 import { updateSessionStore } from "../../config/sessions.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
+import type { MsgContext, TemplateContext } from "../templating.js";
 import { resolveModelDirectiveSelection, type ModelDirectiveSelection } from "./model-selection.js";
 
 type ResetModelResult = {
@@ -99,6 +99,7 @@ export async function applyResetModelOverride(params: {
   defaultProvider: string;
   defaultModel: string;
   aliasIndex: ModelAliasIndex;
+  modelCatalog?: ModelCatalogEntry[];
 }): Promise<ResetModelResult> {
   if (!params.resetTriggered) {
     return {};
@@ -113,7 +114,7 @@ export async function applyResetModelOverride(params: {
     return {};
   }
 
-  const catalog = await loadModelCatalog({ config: params.cfg });
+  const catalog = params.modelCatalog ?? (await loadModelCatalog({ config: params.cfg }));
   const allowed = buildAllowedModelSet({
     cfg: params.cfg,
     catalog,

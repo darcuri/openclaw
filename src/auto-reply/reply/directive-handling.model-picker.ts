@@ -1,5 +1,9 @@
+import {
+  findNormalizedProviderValue,
+  type ModelRef,
+  normalizeProviderId,
+} from "../../agents/model-selection.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import { type ModelRef, normalizeProviderId } from "../../agents/model-selection.js";
 
 export type ModelPickerCatalogEntry = {
   provider: string;
@@ -88,7 +92,7 @@ export function resolveProviderEndpointLabel(
     string,
     { baseUrl?: string; api?: string } | undefined
   >;
-  const entry = providers[normalized];
+  const entry = findNormalizedProviderValue(providers, normalized);
   const endpoint = entry?.baseUrl?.trim();
   const api = entry?.api?.trim();
   return {

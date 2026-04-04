@@ -63,6 +63,7 @@ openclaw channels status --probe
 <Note>
 Gateway config reload watches the active config file path (resolved from profile/state defaults, or `OPENCLAW_CONFIG_PATH` when set).
 Default mode is `gateway.reload.mode="hybrid"`.
+After the first successful load, the running process serves the active in-memory config snapshot; successful reload swaps that snapshot atomically.
 </Note>
 
 ## Runtime model
@@ -70,10 +71,34 @@ Default mode is `gateway.reload.mode="hybrid"`.
 - One always-on process for routing, control plane, and channel connections.
 - Single multiplexed port for:
   - WebSocket control/RPC
-  - HTTP APIs (OpenAI-compatible, Responses, tools invoke)
+  - HTTP APIs, OpenAI compatible (`/v1/models`, `/v1/embeddings`, `/v1/chat/completions`, `/v1/responses`, `/tools/invoke`)
   - Control UI and hooks
 - Default bind mode: `loopback`.
 - Auth is required by default (`gateway.auth.token` / `gateway.auth.password`, or `OPENCLAW_GATEWAY_TOKEN` / `OPENCLAW_GATEWAY_PASSWORD`).
+
+## OpenAI-compatible endpoints
+
+OpenClaw’s highest-leverage compatibility surface is now:
+
+- `GET /v1/models`
+- `GET /v1/models/{id}`
+- `POST /v1/embeddings`
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+
+Why this set matters:
+
+- Most Open WebUI, LobeChat, and LibreChat integrations probe `/v1/models` first.
+- Many RAG and memory pipelines expect `/v1/embeddings`.
+- Agent-native clients increasingly prefer `/v1/responses`.
+
+Planning note:
+
+- `/v1/models` is agent-first: it returns `openclaw`, `openclaw/default`, and `openclaw/<agentId>`.
+- `openclaw/default` is the stable alias that always maps to the configured default agent.
+- Use `x-openclaw-model` when you want a backend provider/model override; otherwise the selected agent's normal model and embedding setup stays in control.
+
+All of these run on the main Gateway port and use the same trusted operator auth boundary as the rest of the Gateway HTTP API.
 
 ### Port and bind precedence
 
@@ -154,6 +179,43 @@ For persistence after logout, enable lingering:
 sudo loginctl enable-linger <user>
 ```
 
+Manual user-unit example when you need a custom install path:
+
+```ini
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/openclaw gateway --port 18789
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+TimeoutStartSec=30
+SuccessExitStatus=0 143
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+```
+
+  </Tab>
+
+  <Tab title="Windows (native)">
+
+```powershell
+openclaw gateway install
+openclaw gateway status --json
+openclaw gateway restart
+openclaw gateway stop
+```
+
+Native Windows managed startup uses a Scheduled Task named `OpenClaw Gateway`
+(or `OpenClaw Gateway (<profile>)` for named profiles). If Scheduled Task
+creation is denied, OpenClaw falls back to a per-user Startup-folder launcher
+that points at `gateway.cmd` inside the state directory.
+
   </Tab>
 
   <Tab title="Linux (system service)">
@@ -164,6 +226,10 @@ Use a system unit for multi-user/always-on hosts.
 sudo systemctl daemon-reload
 sudo systemctl enable --now openclaw-gateway[-<profile>].service
 ```
+
+Use the same service body as the user unit, but install it under
+`/etc/systemd/system/openclaw-gateway[-<profile>].service` and adjust
+`ExecStart=` if your `openclaw` binary lives elsewhere.
 
   </Tab>
 </Tabs>
@@ -234,12 +300,12 @@ Events are not replayed. On sequence gaps, refresh state (`health`, `system-pres
 
 ## Common failure signatures
 
-| Signature                                                      | Likely issue                             |
-| -------------------------------------------------------------- | ---------------------------------------- |
-| `refusing to bind gateway ... without auth`                    | Non-loopback bind without token/password |
-| `another gateway instance is already listening` / `EADDRINUSE` | Port conflict                            |
-| `Gateway start blocked: set gateway.mode=local`                | Config set to remote mode                |
-| `unauthorized` during connect                                  | Auth mismatch between client and gateway |
+| Signature                                                      | Likely issue                                                                    |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `refusing to bind gateway ... without auth`                    | Non-loopback bind without a valid gateway auth path                             |
+| `another gateway instance is already listening` / `EADDRINUSE` | Port conflict                                                                   |
+| `Gateway start blocked: set gateway.mode=local`                | Config set to remote mode, or local-mode stamp is missing from a damaged config |
+| `unauthorized` during connect                                  | Auth mismatch between client and gateway                                        |
 
 For full diagnosis ladders, use [Gateway Troubleshooting](/gateway/troubleshooting).
 

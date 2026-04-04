@@ -1,4 +1,8 @@
 import crypto from "node:crypto";
+import { getShellConfig } from "../../agents/shell-utils.js";
+import { createChildAdapter } from "./adapters/child.js";
+import { createPtyAdapter } from "./adapters/pty.js";
+import { createRunRegistry } from "./registry.js";
 import type {
   ManagedRun,
   ProcessSupervisor,
@@ -7,13 +11,6 @@ import type {
   SpawnInput,
   TerminationReason,
 } from "./types.js";
-import { getShellConfig } from "../../agents/shell-utils.js";
-import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { createChildAdapter } from "./adapters/child.js";
-import { createPtyAdapter } from "./adapters/pty.js";
-import { createRunRegistry } from "./registry.js";
-
-const log = createSubsystemLogger("process/supervisor");
 
 type ActiveRun = {
   run: ManagedRun;
@@ -264,7 +261,8 @@ export function createProcessSupervisor(): ProcessSupervisor {
         exitCode: null,
         exitSignal: null,
       });
-      log.warn(`spawn failed: runId=${runId} reason=${String(err)}`);
+      const { warnProcessSupervisorSpawnFailure } = await import("./supervisor-log.runtime.js");
+      warnProcessSupervisorSpawnFailure(`spawn failed: runId=${runId} reason=${String(err)}`);
       throw err;
     }
   };

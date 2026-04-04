@@ -1,6 +1,8 @@
 import { normalizeChatType } from "../../channels/chat-type.js";
+import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { resolveSenderLabel } from "../../channels/sender-label.js";
-import { formatZonedTimestamp } from "../../infra/format-time/format-datetime.js";
+import type { EnvelopeFormatOptions } from "../envelope.js";
+import { formatEnvelopeTimestamp } from "../envelope.js";
 import type { TemplateContext } from "../templating.js";
 
 function safeTrim(value: unknown): string | undefined {
@@ -11,24 +13,14 @@ function safeTrim(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function formatConversationTimestamp(value: unknown): string | undefined {
+function formatConversationTimestamp(
+  value: unknown,
+  envelope?: EnvelopeFormatOptions,
+): string | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return undefined;
-  }
-  const formatted = formatZonedTimestamp(date);
-  if (!formatted) {
-    return undefined;
-  }
-  try {
-    const weekday = new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(date);
-    return weekday ? `${weekday} ${formatted}` : formatted;
-  } catch {
-    return formatted;
-  }
+  return formatEnvelopeTimestamp(value, envelope);
 }
 
 function resolveInboundChannel(ctx: TemplateContext): string | undefined {
@@ -40,6 +32,22 @@ function resolveInboundChannel(ctx: TemplateContext): string | undefined {
     }
   }
   return channelValue;
+}
+
+function resolveInboundFormattingHints(ctx: TemplateContext):
+  | {
+      text_markup: string;
+      rules: string[];
+    }
+  | undefined {
+  const channelValue = resolveInboundChannel(ctx);
+  if (!channelValue) {
+    return undefined;
+  }
+  const normalizedChannel = normalizeChannelId(channelValue) ?? channelValue;
+  return getChannelPlugin(normalizedChannel)?.agentPrompt?.inboundFormattingHints?.({
+    accountId: safeTrim(ctx.AccountId) ?? undefined,
+  });
 }
 
 export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
@@ -65,6 +73,7 @@ export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
     provider: safeTrim(ctx.Provider),
     surface: safeTrim(ctx.Surface),
     chat_type: chatType ?? (isDirect ? "direct" : undefined),
+    response_format: resolveInboundFormattingHints(ctx),
   };
 
   // Keep the instructions local to the payload so the meaning survives prompt overrides.
@@ -81,7 +90,10 @@ export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
   ].join("\n");
 }
 
-export function buildInboundUserContextPrefix(ctx: TemplateContext): string {
+export function buildInboundUserContextPrefix(
+  ctx: TemplateContext,
+  envelope?: EnvelopeFormatOptions,
+): string {
   const blocks: string[] = [];
   const chatType = normalizeChatType(ctx.ChatType);
   const isDirect = !chatType || chatType === "direct";
@@ -94,7 +106,7 @@ export function buildInboundUserContextPrefix(ctx: TemplateContext): string {
   const messageId = safeTrim(ctx.MessageSid);
   const messageIdFull = safeTrim(ctx.MessageSidFull);
   const resolvedMessageId = messageId ?? messageIdFull;
-  const timestampStr = formatConversationTimestamp(ctx.Timestamp);
+  const timestampStr = formatConversationTimestamp(ctx.Timestamp, envelope);
 
   const conversationInfo = {
     message_id: shouldIncludeConversationInfo ? resolvedMessageId : undefined,
