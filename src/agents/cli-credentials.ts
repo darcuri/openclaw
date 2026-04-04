@@ -1,4 +1,3 @@
-import type { OAuthCredentials, OAuthProvider } from "@mariozechner/pi-ai";
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";

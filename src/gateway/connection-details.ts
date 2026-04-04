@@ -42,7 +42,9 @@ export function buildGatewayConnectionDetailsWithResolvers(
     resolvers.resolveGatewayPort?.(config, process.env) ?? resolveGatewayPort(config);
   const bindMode = config.gateway?.bind ?? "loopback";
   const scheme = tlsEnabled ? "wss" : "ws";
-  const localUrl = `${scheme}://127.0.0.1:${localPort}`;
+  // Self-connections should always target loopback; bind mode only controls listener exposure.
+  const selfConnectHost = config.gateway?.customBindHost?.trim() || "127.0.0.1";
+  const localUrl = `${scheme}://${selfConnectHost}:${localPort}`;
   const cliUrlOverride =
     typeof options.url === "string" && options.url.trim().length > 0
       ? options.url.trim()
